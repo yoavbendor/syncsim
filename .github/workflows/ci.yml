@@ -1,0 +1,45 @@
+name: sim-ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build simulator image (OMNeT++ + INET)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: syncsim:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Minimal scenario (M1 smoke)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
+            bash scripts/run.sh Minimal simulations/minimal.ini results
+
+      - name: Export + analyze telemetry
+        # Non-blocking until the exact clock-time signal name is confirmed from the
+        # first green build (the analyzer prints the available signals to wire up).
+        continue-on-error: true
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
+            python3 scripts/analyze.py results
+
+      - name: Archive results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimal-results
+          path: results/
