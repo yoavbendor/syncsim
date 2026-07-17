@@ -62,10 +62,18 @@ docker run --rm -v "$PWD:/work" syncsim python3 scripts/analyze.py results
 - **M5** — observability, scenario sweeps (the levers), phase-aware assertions
 - **M6** — optional `clknetsim`/ptp4l cross-check
 
-## Status / known verification points
+## Status
 
-The first CI build is the toolchain's proving ground (a full INET build takes ~20–30 min,
-cached thereafter). Two things get confirmed from that first green run and are handled
-defensively until then:
-1. exact INET 4.5.4 parameter paths in `minimal.ini` (roles, oscillator, reference clock);
-2. the exact recordable clock-time signal name used by `analyze.py`.
+**M1 is done and green in CI.** Independent drifting clocks (client1 at 200ppm, client2 at
+-350ppm, the switch at 80ppm) genuinely converge over gPTP, measured via INET's own
+`gptp.timeDifference` signal on each syncing node. From a real run:
+
+```
+client1.gptp   final=+0.00us  peak=25.01us   (200ppm drift)
+client2.gptp   final=+0.00us  peak=43.76us   (-350ppm drift)
+sw.gptp        final=+0.00us  peak=10.00us   (80ppm drift)
+```
+
+Peak error scales with configured drift magnitude and every node settles to ~0 offset --
+the signature of real physics, not a placeholder. `analyze.py` asserts `--max-offset-us 200`
+in CI (`--strict`), well above the observed peaks but tight enough to catch regressions.

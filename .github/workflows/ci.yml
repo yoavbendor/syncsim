@@ -30,12 +30,9 @@ jobs:
             bash scripts/run.sh General simulations/minimal.ini results
 
       - name: Export + analyze telemetry
-        # Non-blocking until the exact clock-time signal name is confirmed from the
-        # first green build (the analyzer prints the available signals to wire up).
-        continue-on-error: true
         run: |
           docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
-            python3 scripts/analyze.py results
+            python3 scripts/analyze.py results --max-offset-us 200 --strict
 
       - name: Archive results
         if: always()
