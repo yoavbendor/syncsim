@@ -27,7 +27,7 @@ jobs:
       - name: Run Minimal scenario (M1 smoke)
         run: |
           docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
-            bash scripts/run.sh Minimal simulations/minimal.ini results
+            bash scripts/run.sh General simulations/minimal.ini results
 
       - name: Export + analyze telemetry
         # Non-blocking until the exact clock-time signal name is confirmed from the

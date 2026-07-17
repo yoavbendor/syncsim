@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Run a scenario headless with opp_run + the INET shared library.
+# CONFIG is an omnetpp.ini [Config <name>] *section* name (default: General),
+# not the NED network name -- those are two different things.
 # Usage: scripts/run.sh [CONFIG] [INI] [RESULT_DIR]
-#   scripts/run.sh Minimal simulations/minimal.ini results
+#   scripts/run.sh General simulations/minimal.ini results
 set -euo pipefail
 
-CONFIG="${1:-Minimal}"
+CONFIG="${1:-General}"
 INI="${2:-simulations/minimal.ini}"
 RESULT_DIR="${3:-results}"
 

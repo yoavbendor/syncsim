@@ -48,7 +48,7 @@ scripts/
 
 ```bash
 docker build -t syncsim .
-docker run --rm -v "$PWD:/work" syncsim bash scripts/run.sh Minimal simulations/minimal.ini results
+docker run --rm -v "$PWD:/work" syncsim bash scripts/run.sh General simulations/minimal.ini results
 docker run --rm -v "$PWD:/work" syncsim python3 scripts/analyze.py results
 ```
 
