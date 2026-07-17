@@ -12,7 +12,12 @@ RESULT_DIR="${3:-results}"
 
 : "${INET_ROOT:?INET_ROOT must be set (provided by the Docker image)}"
 
+# opp_run resolves --result-dir relative to the .ini file's directory, not the
+# cwd. Make it absolute so callers get results where they actually asked for
+# them (e.g. simulations/minimal.ini + result dir "results" would otherwise
+# silently land in simulations/results/).
 mkdir -p "$RESULT_DIR"
+RESULT_DIR="$(cd "$RESULT_DIR" && pwd)"
 
 echo ">> Running config '$CONFIG' from '$INI' -> '$RESULT_DIR'"
 opp_run \
