@@ -57,3 +57,23 @@ jobs:
         with:
           name: nominal-results
           path: results-nominal/
+
+      - name: Run Congestion scenario (M3 finite queues + background traffic)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
+            bash scripts/run.sh General simulations/congestion.ini results-congestion
+
+      - name: Export + analyze congestion telemetry
+        # Non-blocking until real drop/backlog numbers are observed and a
+        # convergence threshold is tuned (same bootstrap workflow M1/M2 used).
+        continue-on-error: true
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
+            python3 scripts/analyze.py results-congestion --max-offset-us 2000
+
+      - name: Archive Congestion results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: congestion-results
+          path: results-congestion/

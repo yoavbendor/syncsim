@@ -55,6 +55,19 @@ def export_vectors_to_csv(result_dir: Path) -> Path:
     return csv_path
 
 
+def export_scalars_to_csv(result_dir: Path) -> Path | None:
+    """Use opp_scavetool to export .sca files to a long-form CSV."""
+    sca_files = glob.glob(str(result_dir / "*.sca"))
+    if not sca_files:
+        return None
+    csv_path = result_dir / "scalars.csv"
+    cmd = ["opp_scavetool", "export", "-T", "s", "-F", "CSV-R",
+           "-o", str(csv_path), *sca_files]
+    print(f"[analyze] {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+    return csv_path
+
+
 def load_vectors(csv_path: Path) -> pd.DataFrame:
     """Return the long-form vector rows (module, name, vectime, vecvalue)."""
     df = pd.read_csv(csv_path)
@@ -74,6 +87,36 @@ def hop_count_for(module: str) -> int | None:
         if pattern.match(module):
             return hops
     return None
+
+
+def print_queue_summary(df: pd.DataFrame, result_dir: Path) -> None:
+    """Report per-port egress queue backlog (from queueLength:vector) and, if
+    present, packet drop counts (from the .sca scalars) -- makes real TSN
+    switch congestion (M3: finite DropTailQueue under offered load) directly
+    observable rather than only inferred from timing effects."""
+    queue_rows = df[(df["name"] == "queueLength:vector") & df["module"].str.contains(r"\.macLayer\.queue$")]
+    if not queue_rows.empty:
+        print("[analyze] egress queue backlog (packets):")
+        for _, row in queue_rows.sort_values("module").iterrows():
+            values = parse_series(row.get("vecvalue"))
+            if not values:
+                continue
+            print(f"  {row['module']:35s} max={max(values):5.0f}  mean={sum(values) / len(values):6.2f}")
+
+    scalars_csv = export_scalars_to_csv(result_dir)
+    if scalars_csv is None:
+        return
+    sdf = pd.read_csv(scalars_csv)
+    sdf = sdf[sdf.get("type", "scalar") == "scalar"] if "type" in sdf else sdf
+    if "name" not in sdf:
+        return
+    dropped = sdf[sdf["name"].str.contains("dropped", case=False, na=False) & (sdf.get("value", 0) > 0)]
+    if not dropped.empty:
+        print("[analyze] packet drops (nonzero scalars):")
+        for _, row in dropped.sort_values("module").iterrows():
+            print(f"  {row['module']:35s} {row['name']:35s} {row['value']:.0f}")
+    else:
+        print("[analyze] no nonzero drop scalars found.")
 
 
 def main() -> int:
@@ -136,6 +179,8 @@ def main() -> int:
         print("[analyze] convergence: PASS -- all syncing nodes converged.")
     else:
         print("[analyze] convergence: FAIL -- see nodes above.", file=sys.stderr)
+
+    print_queue_summary(df, result_dir)
 
     return 0 if (all_converged or not args.strict) else 1
 
