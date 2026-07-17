@@ -8,8 +8,8 @@
 //   sw.ethg[2] <-> client2  => switch eth2 is a MASTER port
 // gPTP roles are assigned in minimal.ini via gptp.masterPorts.
 //
-package syncsim.simulations;
-
+// No package declaration: run.sh passes "simulations" itself as a NED root
+// (-n "$INET_ROOT/src:simulations"), so files directly under it are unpackaged.
 import inet.networks.base.TsnNetworkBase;
 import inet.node.ethernet.EthernetLink;
 import inet.node.tsn.TsnClock;
