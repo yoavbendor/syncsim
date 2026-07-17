@@ -2,22 +2,23 @@
 """
 Post-run analysis for the gPTP sync sandbox.
 
-Reads the OMNeT++ result vectors from a result directory, derives each node's
-clock offset from the grandmaster, and (for M1) asserts that the clients
-converge. Written defensively: on the first CI run the exact clock-time signal
-name is unknown, so if the expected signal is missing the script prints every
-available vector name (so we can wire it up) and exits 0 unless --strict.
+Reads OMNeT++ result vectors and checks the M1 convergence property: every
+syncing node's gPTP-measured offset from its master (INET's own
+`gptp.timeDifference` signal) settles to a small value by the end of the run.
 
 Usage:
-    python3 scripts/analyze.py results [--gm gm] [--strict]
+    python3 scripts/analyze.py results [--max-offset-us 1000] [--strict]
 """
 import argparse
 import glob
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pandas as pd
+
+_NUM_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 
 
 def export_vectors_to_csv(result_dir: Path) -> Path:
@@ -34,20 +35,26 @@ def export_vectors_to_csv(result_dir: Path) -> Path:
     return csv_path
 
 
-def load_clock_vectors(csv_path: Path) -> pd.DataFrame:
+def load_vectors(csv_path: Path) -> pd.DataFrame:
     """Return the long-form vector rows (module, name, vectime, vecvalue)."""
     df = pd.read_csv(csv_path)
-    # CSV-R stores vectors with columns: type,module,name,vectime,vecvalue,...
-    df = df[df.get("type", "vector") == "vector"] if "type" in df else df
-    return df
+    return df[df.get("type", "vector") == "vector"] if "type" in df else df
+
+
+def parse_series(cell) -> list[float]:
+    """vecvalue/vectime cells are a single string of space/comma-separated numbers."""
+    if not isinstance(cell, str) or not cell:
+        return []
+    return [float(x) for x in _NUM_RE.findall(cell)]
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("result_dir")
-    ap.add_argument("--gm", default="gm", help="grandmaster node name")
+    ap.add_argument("--max-offset-us", type=float, default=1000.0,
+                     help="convergence bound on |final gptp offset| in microseconds")
     ap.add_argument("--strict", action="store_true",
-                    help="fail (exit 1) if clock signals are missing or clients don't converge")
+                     help="fail (exit 1) if signals are missing or a node doesn't converge")
     args = ap.parse_args()
 
     result_dir = Path(args.result_dir)
@@ -55,26 +62,40 @@ def main() -> int:
     if csv_path is None:
         return 1 if args.strict else 0
 
-    df = load_clock_vectors(csv_path)
+    df = load_vectors(csv_path)
     names = sorted(df["name"].unique()) if "name" in df else []
-    modules = sorted(df["module"].unique()) if "module" in df else []
     print(f"[analyze] available vector names: {names}")
-    print(f"[analyze] modules with vectors: {modules[:20]}{' ...' if len(modules) > 20 else ''}")
 
-    # Look for a clock-time vector (name confirmed against the pinned INET build).
-    clock_rows = df[df["name"].str.contains("time", case=False, na=False)] if "name" in df else pd.DataFrame()
-    if clock_rows.empty:
-        msg = "[analyze] no clock-time vector found yet -- inspect the names above and wire up the signal."
-        print(msg, file=sys.stderr)
+    # INET's Gptp module records the measured offset-from-master as
+    # `timeDifference:vector` on each syncing node's `<node>.gptp` submodule.
+    offset_rows = df[(df["name"] == "timeDifference:vector") & df["module"].str.endswith(".gptp")]
+    if offset_rows.empty:
+        print("[analyze] no gptp.timeDifference vectors found -- inspect the names above.", file=sys.stderr)
         return 1 if args.strict else 0
 
-    print(f"[analyze] found candidate clock-time vectors for {clock_rows['module'].nunique()} module(s).")
-    # Convergence assertion is enabled once the signal is confirmed (M1 follow-up).
-    # Placeholder summary so CI artifacts always carry something useful:
-    summary = clock_rows.groupby("module")["name"].first()
-    print("[analyze] per-module clock vectors:")
-    print(summary.to_string())
-    return 0
+    threshold_s = args.max_offset_us / 1e6
+    all_converged = True
+    print(f"[analyze] M1 convergence check (|final offset| < {args.max_offset_us:.0f} us):")
+    for _, row in offset_rows.sort_values("module").iterrows():
+        values = parse_series(row.get("vecvalue"))
+        if not values:
+            print(f"  {row['module']:30s} no samples")
+            all_converged = False
+            continue
+        final = values[-1]
+        peak = max(abs(v) for v in values)
+        converged = abs(final) < threshold_s
+        all_converged &= converged
+        status = "PASS" if converged else "FAIL"
+        print(f"  {row['module']:30s} final={final * 1e6:+9.2f}us  peak={peak * 1e6:9.2f}us  "
+              f"n={len(values):5d}  [{status}]")
+
+    if all_converged:
+        print("[analyze] M1 convergence: PASS -- all syncing nodes converged.")
+    else:
+        print("[analyze] M1 convergence: FAIL -- see nodes above.", file=sys.stderr)
+
+    return 0 if (all_converged or not args.strict) else 1
 
 
 if __name__ == "__main__":
