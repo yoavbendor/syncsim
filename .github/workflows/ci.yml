@@ -47,12 +47,9 @@ jobs:
             bash scripts/run.sh General simulations/nominal.ini results-nominal
 
       - name: Export + analyze nominal telemetry
-        # Non-blocking until real per-hop offset numbers are observed and the
-        # threshold is tuned (same workflow M1 used before it went --strict).
-        continue-on-error: true
         run: |
           docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
-            python3 scripts/analyze.py results-nominal --max-offset-us 1000
+            python3 scripts/analyze.py results-nominal --max-offset-us 200 --strict
 
       - name: Archive Nominal results
         if: always()
