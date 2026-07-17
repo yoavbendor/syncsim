@@ -2,9 +2,14 @@
 """
 Post-run analysis for the gPTP sync sandbox.
 
-Reads OMNeT++ result vectors and checks the M1 convergence property: every
+Reads OMNeT++ result vectors and checks the convergence property: every
 syncing node's gPTP-measured offset from its master (INET's own
 `gptp.timeDifference` signal) settles to a small value by the end of the run.
+
+For known multi-hop topologies (M2+), also groups nodes by hop count from the
+GM and reports how peak sync error grows with hop depth -- this is the
+hop-by-hop peer-delay / residence-time accumulation effect (IEEE 802.1AS
+transparent/boundary-clock behavior).
 
 Usage:
     python3 scripts/analyze.py results [--max-offset-us 1000] [--strict]
@@ -19,6 +24,21 @@ from pathlib import Path
 import pandas as pd
 
 _NUM_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
+
+# Hop count from the GM to each node's gptp module, per known topology.
+# Keyed by the network's root module name (the first path component).
+HOP_MAPS = {
+    "Minimal": [
+        (re.compile(r"^Minimal\.sw\.gptp$"), 1),
+        (re.compile(r"^Minimal\.client\d+\.gptp$"), 2),
+    ],
+    "Nominal": [
+        (re.compile(r"^Nominal\.swCore\.gptp$"), 1),
+        (re.compile(r"^Nominal\.coreClient\.gptp$"), 2),
+        (re.compile(r"^Nominal\.sw[ABC]\.gptp$"), 2),
+        (re.compile(r"^Nominal\.clients[ABC]\[\d+\]\.gptp$"), 3),
+    ],
+}
 
 
 def export_vectors_to_csv(result_dir: Path) -> Path:
@@ -48,6 +68,14 @@ def parse_series(cell) -> list[float]:
     return [float(x) for x in _NUM_RE.findall(cell)]
 
 
+def hop_count_for(module: str) -> int | None:
+    root = module.split(".", 1)[0]
+    for pattern, hops in HOP_MAPS.get(root, []):
+        if pattern.match(module):
+            return hops
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("result_dir")
@@ -75,11 +103,13 @@ def main() -> int:
 
     threshold_s = args.max_offset_us / 1e6
     all_converged = True
-    print(f"[analyze] M1 convergence check (|final offset| < {args.max_offset_us:.0f} us):")
+    by_hop: dict[int, list[float]] = {}
+    print(f"[analyze] convergence check (|final offset| < {args.max_offset_us:.0f} us):")
     for _, row in offset_rows.sort_values("module").iterrows():
+        module = row["module"]
         values = parse_series(row.get("vecvalue"))
         if not values:
-            print(f"  {row['module']:30s} no samples")
+            print(f"  {module:30s} no samples")
             all_converged = False
             continue
         final = values[-1]
@@ -87,13 +117,25 @@ def main() -> int:
         converged = abs(final) < threshold_s
         all_converged &= converged
         status = "PASS" if converged else "FAIL"
-        print(f"  {row['module']:30s} final={final * 1e6:+9.2f}us  peak={peak * 1e6:9.2f}us  "
-              f"n={len(values):5d}  [{status}]")
+        hops = hop_count_for(module)
+        hop_label = f"hops={hops}" if hops is not None else "hops=?"
+        print(f"  {module:30s} final={final * 1e6:+9.2f}us  peak={peak * 1e6:9.2f}us  "
+              f"n={len(values):5d}  {hop_label}  [{status}]")
+        if hops is not None:
+            by_hop.setdefault(hops, []).append(peak)
+
+    if by_hop:
+        print("[analyze] peak offset by hop count from GM:")
+        for hops in sorted(by_hop):
+            peaks = by_hop[hops]
+            mean_peak = sum(peaks) / len(peaks)
+            print(f"  hops={hops}  n_nodes={len(peaks):3d}  "
+                  f"mean_peak={mean_peak * 1e6:8.2f}us  max_peak={max(peaks) * 1e6:8.2f}us")
 
     if all_converged:
-        print("[analyze] M1 convergence: PASS -- all syncing nodes converged.")
+        print("[analyze] convergence: PASS -- all syncing nodes converged.")
     else:
-        print("[analyze] M1 convergence: FAIL -- see nodes above.", file=sys.stderr)
+        print("[analyze] convergence: FAIL -- see nodes above.", file=sys.stderr)
 
     return 0 if (all_converged or not args.strict) else 1
 
