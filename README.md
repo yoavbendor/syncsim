@@ -217,4 +217,35 @@ series, which a multi-iteration result directory violates (the same module path 
 once per iteration). `summarize_sweep.py` is the sweep's own comparison report; per-
 iteration model-correctness isn't independently re-verified here.
 
-*Real numbers pending the first CI run of this mechanism (both pieces are new).*
+**M5 is done and green in CI. Both mechanisms worked on the first attempt**, and each
+revealed something whole-run peak/final numbers couldn't show.
+
+**Time-windowed report** confirms and sharpens the M2/M3 findings with temporal
+resolution:
+
+```
+M2/M4 (uncongested): all peak activity in window 0 (0-15s, initial convergence
+  transient) -- exactly 0.00us in windows 1-3. Confirms gPTP locks fast and stays
+  essentially perfectly synced for the rest of the run.
+
+M3 (congestion): coreClient.gptp peak per window = 1609.70 / 1949.64 / 1212.79 / 1302.22us
+  -- sustained across all 4 windows, not a brief spike. The ~100x degradation is a
+  steady-state condition tied to continuous congestion, not a one-time transient.
+```
+
+**Parameter sweep** (queue capacity x {5, 20, 80} on the M3 congestion traffic) produced a
+real, textbook-instructive result -- not the naive expectation:
+
+```
+cap= 5   drop=342,635.3 ppm (34.26%)
+cap=20   drop=340,960.9 ppm (34.10%)
+cap=80   drop=341,802.7 ppm (34.18%)
+```
+
+**Drop rate is essentially flat regardless of a 16x change in queue capacity.** Under
+*sustained* oversubscription (150Mbps offered vs 100Mbps link, continuously), loss rate
+converges to `(offered - capacity) / offered` regardless of buffer depth -- bigger buffers
+only add latency, they don't rescue you from persistent overload. This is the exact flip
+side of M4's finding (buffer *size* mattered there, because M4's load was a transient
+burst, not a sustained flood): together, M3/M4/M5 now tell a coherent, correct story about
+when queue depth matters and when it doesn't.
