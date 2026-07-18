@@ -95,3 +95,26 @@ jobs:
         with:
           name: feedback-results
           path: results-feedback/
+
+      - name: Run Sweep scenario (M5 queue-capacity parameter sweep)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
+            bash scripts/run_sweep.sh General simulations/sweep.ini results-sweep
+
+      - name: Summarize sweep
+        # Informational, not gated by analyze.py's --strict: analyze.py's
+        # sanity check assumes one module path maps to one series, which a
+        # multi-iteration sweep result dir violates (the same module path
+        # repeats once per iteration). summarize_sweep.py is the sweep's own
+        # comparison report; per-iteration model-correctness isn't re-checked
+        # here -- a real scope boundary, not an oversight.
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
+            python3 scripts/summarize_sweep.py results-sweep --var cap
+
+      - name: Archive Sweep results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep-results
+          path: results-sweep/

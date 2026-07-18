@@ -80,7 +80,7 @@ docker run --rm -v "$PWD:/work" syncsim python3 scripts/analyze.py results
 - **M3** — TSN switch realism (finite real-dropping queues, background congestion; priority
   shaping (Qbv/Qav) deferred -- see Status)
 - **M4** — emergent feedback loop (clock-driven burst sources; see Status)
-- **M5** — observability, scenario sweeps (the levers), phase-aware assertions
+- **M5** — observability: time-windowed reporting + a real parameter sweep (see Status)
 - **M6** — optional `clknetsim`/ptp4l cross-check
 
 ## Status
@@ -194,3 +194,27 @@ couples to sync in this model; intermittent burst congestion that drains between
 apparently doesn't -- at least at this burst/period ratio. A natural follow-up (not yet
 attempted) would be narrowing the gap between bursts and PTP's own cadence, or shrinking
 the queue further, to find where -- or whether -- the coupling actually appears.
+
+**M5 (in progress).** Two additions, both scoped to avoid gambling on unconfirmed
+mechanisms:
+
+1. **Time-windowed reporting** (`analyze.py --time-windows N`, default 4): peak |offset|
+   per node broken into equal windows across the run, not just whole-run peak/final.
+   Surfaces transient onset or oscillation within a constant-load run without needing any
+   new scenario mechanics. (Phased scenarios via `ScenarioManager` runtime `set-param` on
+   `productionInterval` were considered and set aside -- whether `ActivePacketSource`'s
+   `volatile` parameter actually re-reads after a runtime change wasn't confirmed, and
+   this gives most of the same visibility on data already collected.)
+2. **A real parameter sweep** (`sweep.ini` + `scripts/run_sweep.sh` +
+   `scripts/summarize_sweep.py`): queue capacity swept across `{5, 20, 80}` in one ini
+   using OMNeT++'s native `${var=...}` iteration syntax -- one CI step, three runs, one
+   drop-rate-vs-capacity comparison table. This is the concrete "lever" M5 is about:
+   instead of hand-editing a number and re-running, the sweep *is* the scenario.
+
+**Scope boundary, stated honestly:** the sweep's per-iteration `.sca`/`.vec` files aren't
+run through `analyze.py --strict` -- its sanity check assumes one module path maps to one
+series, which a multi-iteration result directory violates (the same module path repeats
+once per iteration). `summarize_sweep.py` is the sweep's own comparison report; per-
+iteration model-correctness isn't independently re-verified here.
+
+*Real numbers pending the first CI run of this mechanism (both pieces are new).*

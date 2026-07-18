@@ -130,6 +130,35 @@ def print_offset_report(offset_rows: pd.DataFrame) -> dict[str, list[float]]:
     return series_by_module
 
 
+def print_time_windowed_report(offset_rows: pd.DataFrame, sim_time_s: float, num_windows: int) -> None:
+    """Peak |offset| per node broken into equal time windows across the run.
+    Whole-run peak/final (print_offset_report) can hide transient onset or
+    oscillation within a constant-load run -- this surfaces it without
+    requiring any new scenario mechanics (phases via runtime parameter
+    changes were considered and skipped: whether ActivePacketSource's
+    volatile productionInterval actually re-reads after a ScenarioManager
+    set-param wasn't confirmed, and this gives most of the same visibility
+    on data already collected)."""
+    if num_windows <= 1:
+        return
+    window_size = sim_time_s / num_windows
+    print(f"[analyze] peak |offset| by time window ({num_windows} x {window_size:.1f}s, in us):")
+    header = "  " + f"{'module':30s}" + "".join(f"  w{i:<7d}" for i in range(num_windows))
+    print(header)
+    for _, row in offset_rows.sort_values("module").iterrows():
+        module = row["module"]
+        times = parse_series(row.get("vectime"))
+        values = parse_series(row.get("vecvalue"))
+        if not times or not values:
+            continue
+        window_peaks = [0.0] * num_windows
+        for t, v in zip(times, values):
+            idx = min(int(t // window_size), num_windows - 1)
+            window_peaks[idx] = max(window_peaks[idx], abs(v))
+        row_str = "  " + f"{module:30s}" + "".join(f"  {p * 1e6:7.2f}" for p in window_peaks)
+        print(row_str)
+
+
 def run_sanity_checks(series_by_module: dict[str, list[float]], divergence_ceiling_s: float) -> list[str]:
     """Model-correctness checks -- NOT sync-quality checks. Returns a list of
     failure descriptions (empty if all sane)."""
@@ -217,6 +246,9 @@ def main() -> int:
                           "stopped functioning, not just degraded (default 50ms)")
     ap.add_argument("--sim-time", type=float, default=60.0,
                      help="sim-time-limit used by the scenario, for Mbps/pps derivation")
+    ap.add_argument("--time-windows", type=int, default=4,
+                     help="split the run into this many equal windows and report peak "
+                          "|offset| per window per node (set 1 to disable)")
     ap.add_argument("--strict", action="store_true",
                      help="fail (exit 1) on model-correctness sanity failures "
                           "(missing signals, NaN/Inf, unbounded divergence) -- "
@@ -238,6 +270,7 @@ def main() -> int:
         return 1 if args.strict else 0
 
     series_by_module = print_offset_report(offset_rows)
+    print_time_windowed_report(offset_rows, args.sim_time, args.time_windows)
 
     failures = run_sanity_checks(series_by_module, args.divergence_ceiling_us / 1e6)
     if failures:
