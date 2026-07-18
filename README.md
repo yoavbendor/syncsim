@@ -79,7 +79,7 @@ docker run --rm -v "$PWD:/work" syncsim python3 scripts/analyze.py results
 - **M2** — multi-hop bridges; measure sync-error growth vs hop count
 - **M3** — TSN switch realism (finite real-dropping queues, background congestion; priority
   shaping (Qbv/Qav) deferred -- see Status)
-- **M4** — emergent feedback loop (clock-driven burst sources)
+- **M4** — emergent feedback loop (clock-driven burst sources; see Status)
 - **M5** — observability, scenario sweeps (the levers), phase-aware assertions
 - **M6** — optional `clknetsim`/ptp4l cross-check
 

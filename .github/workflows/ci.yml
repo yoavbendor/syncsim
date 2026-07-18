@@ -78,3 +78,20 @@ jobs:
         with:
           name: congestion-results
           path: results-congestion/
+
+      - name: Run Feedback scenario (M4 clock-driven burst traffic)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
+            bash scripts/run.sh General simulations/feedback.ini results-feedback
+
+      - name: Export + analyze feedback telemetry
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
+            python3 scripts/analyze.py results-feedback --strict
+
+      - name: Archive Feedback results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: feedback-results
+          path: results-feedback/
