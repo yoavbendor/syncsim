@@ -96,8 +96,9 @@ sw.gptp        final=+0.00us  peak=10.00us   (80ppm drift)
 ```
 
 Peak error scales with configured drift magnitude and every node settles to ~0 offset --
-the signature of real physics, not a placeholder. `analyze.py` asserts `--max-offset-us 200`
-in CI (`--strict`), well above the observed peaks but tight enough to catch regressions.
+the signature of real physics, not a placeholder. `analyze.py --strict` gates on model
+correctness (signals present, no NaN/Inf, no unbounded divergence), not on this magnitude
+being small -- see Design principles.
 
 **M2 is done and green in CI.** Multi-hop topology (GM -> core switch -> {coreClient at 2
 hops, 3 zone switches each with 4 clients at 3 hops}, 17 syncing nodes total, every node
@@ -121,17 +122,16 @@ the point of the protocol. To isolate a pure hop-count effect (measurement/quant
 error accumulating independent of drift) would need a follow-up scenario holding drift
 constant across all nodes and only varying hop depth.
 
-**M3 (in progress).** `congestion.ini` reuses the Nominal topology with every switch port's
-egress queue replaced by INET's `DropTailQueue` (packetCapacity=10 -- the confirmed real
-idiom; INET's default queue is unbounded and errors rather than drops if given a capacity
-without a policy) plus background UDP traffic from one client per zone converging on
-`coreClient`'s single 100Mbps uplink (~150Mbps offered, guaranteed oversubscription). A real
-run confirmed:
+**M3 is done and green in CI.** `congestion.ini` reuses the Nominal topology with every
+switch port's egress queue replaced by INET's `DropTailQueue` (packetCapacity=10 -- the
+confirmed real idiom; INET's default queue is unbounded and errors rather than drops if
+given a capacity without a policy) plus background UDP traffic from one client per zone
+converging on `coreClient`'s single 100Mbps uplink. A real run confirmed:
 
 ```
-swCore.eth[1] queue     droppedPacketsQueueOverflow: 383,925 packets   backlog max=10 mean=9.23
-coreClient sink (x3)    droppedPackets: ~247k each, ~741k total
-every other port        backlog max=1-2 -- completely unaffected
+swCore.eth[1] (bottleneck)   148.77 Mbps   18,758.5 pps   drop=341,112 ppm (34.1%)
+every other port             ~0 Mbps -- completely unaffected
+backlog: swCore.eth[1] max=10 mean=9.23 (capacity) -- every other port max=1-2
 
 coreClient.gptp   peak=1949.64us  n=446 samples   (vs ~18.75us / n=958 uncongested, M2)
 swA/B/C, zone clients:  unaffected -- same range as M2 baseline
@@ -143,9 +143,19 @@ than half the normal sync updates. Every node on an unrelated path is untouched.
 core phenomenon the project set out to observe: **congestion doesn't degrade sync globally,
 it degrades sync specifically for whoever shares the congested queue with the data traffic.**
 
-The convergence gate and recording policy were redesigned after this run (see Design
-principles above) -- confirming the redesigned `--strict` sanity check and the trimmed
-artifact size in CI is the remaining step before M3 is called done.
+**The recording policy took three attempts to get right** (documented honestly since it's a
+real lesson, not just a footnote): mixing the `vector-recording` boolean with per-statistic
+`result-recording-modes` on the same statistic first produced *zero* vectors (a real bug the
+new sanity gate caught correctly -- "no .vec files" is exactly the kind of structural failure
+it's meant to catch), then module-path wildcards like `eth[*].**.vector-recording` silently
+did nothing, growing the artifact to 4.68GB. The fix, confirmed against OMNeT++'s actual
+manual source rather than guessed: `result-recording-modes` is keyed **by statistic name**
+regardless of module path, and a bare value *replaces* the mode set. `congestion.ini` now
+sets `sum`/`count` for the length/count stats `analyze.py`'s Mbps/pps/drop-ppm needs, and `-`
+for pure per-packet telemetry with no aggregate use -- gPTP/clock/queue-backlog signals are
+never named, so they keep recording via the untouched default. Result: 2,180 vectors -> 143,
+artifact size ~2GB -> 179MB (~11x smaller), with the underlying physics numbers unchanged
+(bit-for-bit the same offset/drop findings as the original bloated run).
 
 **Deferred from M3's original scope:** priority shaping (Qbv/Qav prioritizing gPTP over
 data) so PTP survives congestion rather than sharing its fate. Shipping it requires
