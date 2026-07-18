@@ -32,6 +32,24 @@ lock-time will not match a production ptp4l build. Milestone 6 adds a `clknetsim
 deliberately out of scope — at gPTP's sampling rate it aliases to noise and teaches nothing
 about the system.
 
+## Design principles
+
+**CI gates on model correctness, never on result magnitude.** A harsh scenario producing
+a large but bounded, recovering offset is a real *result* to study -- the whole point of
+this sandbox is to produce numbers like that -- not a test failure. `analyze.py --strict`
+fails only on evidence the simulator isn't faithfully modeling the real protocol: missing
+expected signals, NaN/Inf in a series, or offset diverging past a generous sanity ceiling
+(default 50ms -- "gPTP has clearly stopped functioning," not a sync-quality target). It
+never fails because a peak offset was merely large.
+
+**Recording policy: data traffic gets descriptors, sync gets everything.** Background
+data-plane UDP traffic is recorded only as aggregate scalars (packet/byte counts, drop
+counts) -- never per-packet vectors, which balloon with offered load (an early congestion
+run produced a ~2GB artifact before this policy existed). `analyze.py` derives Mbps/pps/
+drop-ppm from those scalars for a compact congestion summary. gPTP, clock, and queue-
+backlog signals are the actual subject of study and are **always** fully vector-recorded,
+regardless of data-plane load -- see the recording-policy comment in `congestion.ini`.
+
 ## Layout
 
 ```
@@ -39,9 +57,11 @@ Dockerfile                  # headless OMNeT++ + INET image
 .github/workflows/ci.yml    # build image (cached) + run Minimal + archive results
 simulations/
   minimal.ned / minimal.ini # M1: GM + 1 bridge + 2 clients, independent drifting clocks
+  nominal.ned / nominal.ini # M2: multi-hop -- GM + core switch + 3 zone switches + 13 clients
+  congestion.ini            # M3: Nominal topology + finite queues + background UDP traffic
 scripts/
   run.sh                    # opp_run wrapper (headless Cmdenv)
-  analyze.py                # export vectors -> derive offset-from-GM -> assertions
+  analyze.py                # export vectors/scalars -> offset report, sanity checks, congestion summary
 ```
 
 ## Run locally (any Linux with Docker)
@@ -57,7 +77,8 @@ docker run --rm -v "$PWD:/work" syncsim python3 scripts/analyze.py results
 - **M0** — toolchain + CI + scaffolding *(this commit)*
 - **M1** — minimal synced network (independent drifting clocks actually converge over gPTP)
 - **M2** — multi-hop bridges; measure sync-error growth vs hop count
-- **M3** — TSN switch realism (Qbv/Qav shapers, finite queues, real drops)
+- **M3** — TSN switch realism (finite real-dropping queues, background congestion; priority
+  shaping (Qbv/Qav) deferred -- see Status)
 - **M4** — emergent feedback loop (clock-driven burst sources)
 - **M5** — observability, scenario sweeps (the levers), phase-aware assertions
 - **M6** — optional `clknetsim`/ptp4l cross-check
@@ -99,3 +120,34 @@ correction mechanism is doing its job -- it's actively preventing accumulation, 
 the point of the protocol. To isolate a pure hop-count effect (measurement/quantization
 error accumulating independent of drift) would need a follow-up scenario holding drift
 constant across all nodes and only varying hop depth.
+
+**M3 (in progress).** `congestion.ini` reuses the Nominal topology with every switch port's
+egress queue replaced by INET's `DropTailQueue` (packetCapacity=10 -- the confirmed real
+idiom; INET's default queue is unbounded and errors rather than drops if given a capacity
+without a policy) plus background UDP traffic from one client per zone converging on
+`coreClient`'s single 100Mbps uplink (~150Mbps offered, guaranteed oversubscription). A real
+run confirmed:
+
+```
+swCore.eth[1] queue     droppedPacketsQueueOverflow: 383,925 packets   backlog max=10 mean=9.23
+coreClient sink (x3)    droppedPackets: ~247k each, ~741k total
+every other port        backlog max=1-2 -- completely unaffected
+
+coreClient.gptp   peak=1949.64us  n=446 samples   (vs ~18.75us / n=958 uncongested, M2)
+swA/B/C, zone clients:  unaffected -- same range as M2 baseline
+```
+
+Congestion is isolated exactly to the shared link, and only `coreClient` (which shares the
+overflowing queue with the data traffic) shows degraded sync -- ~100x peak offset and fewer
+than half the normal sync updates. Every node on an unrelated path is untouched. This is the
+core phenomenon the project set out to observe: **congestion doesn't degrade sync globally,
+it degrades sync specifically for whoever shares the congested queue with the data traffic.**
+
+The convergence gate and recording policy were redesigned after this run (see Design
+principles above) -- confirming the redesigned `--strict` sanity check and the trimmed
+artifact size in CI is the remaining step before M3 is called done.
+
+**Deferred from M3's original scope:** priority shaping (Qbv/Qav prioritizing gPTP over
+data) so PTP survives congestion rather than sharing its fate. Shipping it requires
+confirming how INET classifies locally-originated gPTP frames into egress traffic classes,
+which isn't yet established -- a real stretch goal, not silently dropped.

@@ -32,7 +32,7 @@ jobs:
       - name: Export + analyze telemetry
         run: |
           docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
-            python3 scripts/analyze.py results --max-offset-us 200 --strict
+            python3 scripts/analyze.py results --strict
 
       - name: Archive Minimal results
         if: always()
@@ -49,7 +49,7 @@ jobs:
       - name: Export + analyze nominal telemetry
         run: |
           docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
-            python3 scripts/analyze.py results-nominal --max-offset-us 200 --strict
+            python3 scripts/analyze.py results-nominal --strict
 
       - name: Archive Nominal results
         if: always()
@@ -64,12 +64,13 @@ jobs:
             bash scripts/run.sh General simulations/congestion.ini results-congestion
 
       - name: Export + analyze congestion telemetry
-        # Non-blocking until real drop/backlog numbers are observed and a
-        # convergence threshold is tuned (same bootstrap workflow M1/M2 used).
-        continue-on-error: true
+        # Strict, like the other scenarios: gates on model-correctness sanity
+        # (signals present, no NaN/Inf, no unbounded divergence), never on
+        # sync-quality magnitude -- a harsh scenario producing a large but
+        # bounded, recovering offset is a real result to study, not a failure.
         run: |
           docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
-            python3 scripts/analyze.py results-congestion --max-offset-us 2000
+            python3 scripts/analyze.py results-congestion --strict
 
       - name: Archive Congestion results
         if: always()
