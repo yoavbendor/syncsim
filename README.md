@@ -9,6 +9,17 @@ the phenomenon under study.**
 
 Built on **OMNeT++ 6.0.3 + INET 4.5.4**, run headless, entirely observable from CI.
 
+## Visual results (GitHub Pages)
+
+Every CI run publishes a plain-language visual report — per-scenario verdict, a Mermaid
+topology-with-levers diagram, and behavior plots — at
+**https://yoavbendor.github.io/syncsim/**. Built by `scripts/plot_results.py` +
+`scripts/build_site.py` from the same run whose raw results are attached as CI artifacts.
+Mermaid renders the static structure + levers; matplotlib renders the dynamics over time.
+
+> **One-time setup (repo admin):** Settings → Pages → Source = **GitHub Actions**, or the
+> deploy step has nothing to publish to. The repo is public, so the report is world-readable.
+
 ## Why OMNeT++/INET (decision record)
 
 Three tools each own a different corner of the fidelity triangle, and you cannot cheaply

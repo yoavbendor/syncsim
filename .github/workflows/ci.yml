@@ -5,10 +5,24 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Pages deploy needs these; the rest of the job only reads.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One Pages deploy at a time.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-and-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -118,3 +132,29 @@ jobs:
         with:
           name: sweep-results
           path: results-sweep/
+
+      # ---- Phase A: visual report -> GitHub Pages ----
+      # All result dirs (results, results-nominal, ...) persist in the workspace
+      # across steps, so one step turns them all into site/index.html.
+      - name: Build visual report (site/)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci bash -lc '
+            set -e
+            python3 scripts/plot_results.py --result-dir results            --slug m1-minimal    --title "M1 - Minimal (2 clients)"       --network Minimal --ini simulations/minimal.ini    --site site
+            python3 scripts/plot_results.py --result-dir results-nominal    --slug m2-nominal    --title "M2 - Multi-hop (17 devices)"    --network Nominal --ini simulations/nominal.ini    --site site
+            python3 scripts/plot_results.py --result-dir results-congestion --slug m3-congestion --title "M3 - Sustained congestion"      --network Nominal --ini simulations/congestion.ini --site site
+            python3 scripts/plot_results.py --result-dir results-feedback   --slug m4-feedback   --title "M4 - Clock-aligned bursts"      --network Nominal --ini simulations/feedback.ini   --site site
+            python3 scripts/plot_results.py --result-dir results-sweep      --slug m5-sweep      --title "M5 - Buffer-size sweep"         --network Nominal --ini simulations/sweep.ini      --site site --kind sweep
+            python3 scripts/build_site.py --site site
+          '
+
+      - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/claude/sync-simulation-tool-p6ade4'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+
+      - name: Deploy to GitHub Pages
+        if: github.ref == 'refs/heads/claude/sync-simulation-tool-p6ade4'
+        id: deployment
+        uses: actions/deploy-pages@v4
