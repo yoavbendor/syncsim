@@ -161,3 +161,36 @@ artifact size ~2GB -> 179MB (~11x smaller), with the underlying physics numbers 
 data) so PTP survives congestion rather than sharing its fate. Shipping it requires
 confirming how INET classifies locally-originated gPTP frames into egress traffic classes,
 which isn't yet established -- a real stretch goal, not silently dropped.
+
+**M4 is done, with a genuinely surprising honest finding.** `feedback.ini` reuses the
+Nominal topology with all 12 zone clients sending clock-aligned "frame" bursts (10fps,
+timed via `source.clockModule = "^.^.clock"` + `scheduleForAbsoluteTime = true` --
+confirmed directly from `inet/src/inet/queueing/source/ActivePacketSource.ned`, no custom
+C++ needed, contrary to the original plan's assumption) converging on `coreClient`.
+
+First attempt (1400B single-packet frames) validated the mechanism but showed **zero
+effect**: offsets identical to the no-traffic baseline, zero drops -- a 12-packet aligned
+burst can't overflow a 20-packet queue regardless of alignment. Fixed by recognizing the
+relevant variable is burst *width* (simultaneous packet count), not sustained bandwidth:
+20000B frames fragment into ~15 IP packets each, so 12 aligned clients present ~180
+simultaneous packets against the queue. That produced real, substantial, sustained
+congestion:
+
+```
+swA/B/C.eth[0] and swCore.eth[1]   drop rate 41.0-45.8%   queue mean 14-15.5/20 (near-full)
+```
+
+**But gPTP offsets are still bit-for-bit identical to the no-traffic baseline** -- every
+peak value matches M2 exactly, including `coreClient` (18.75us, unchanged). This is not a
+broken mechanism (the queue-backlog numbers clearly changed between runs, confirming the
+simulation genuinely re-ran with different traffic); it's a real, non-obvious research
+result: **M3's sustained flood (~18,750 continuous pps, queue permanently full) degraded
+`coreClient`'s gPTP by ~100x, but M4's periodic bursts (100ms cycles, ~1,008 pps average at
+the same bottleneck) show no measurable coupling at all**, despite a higher peak drop rate.
+The likely explanation: gPTP messages fire roughly every 62ms and may simply land in the
+quieter gaps between 100ms burst cycles often enough to avoid the worst queueing, even
+though the burst instants themselves drop half the data traffic. Sustained congestion
+couples to sync in this model; intermittent burst congestion that drains between cycles
+apparently doesn't -- at least at this burst/period ratio. A natural follow-up (not yet
+attempted) would be narrowing the gap between bursts and PTP's own cadence, or shrinking
+the queue further, to find where -- or whether -- the coupling actually appears.
