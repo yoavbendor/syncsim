@@ -12,16 +12,12 @@
 # naming convention); this session's network access can't browse GitHub's
 # release-asset listing directly, so the real CI build is what confirms or
 # corrects them -- consistent with how every other version-sensitive detail
-# in this project has been verified. First build attempt confirmed the asset
-# URLs were right but failed later on a missing pkg-config (6.0.3 did not
-# need it: "configure: error: pkg-config program not found"). Rather than
-# keep discovering 6.4.0's other new prerequisites one slow CI round at a
-# time, the rest of this list was front-loaded from OMNeT++'s own documented
-# install.sh prerequisites for Ubuntu (ccache, python3-venv, doxygen,
-# graphviz, xdg-utils, libdw-dev) -- this sandbox has no Docker daemon and
-# this session's GitHub access can't cross-add the omnetpp/omnetpp repo to
-# actually build it locally, so the official dependency list is the next
-# best thing to a local repro; the real CI build still confirms it.
+# in this project has been verified. Iterated through pkg-config, then
+# ipython/python/requirements.txt (both new hard requirements of 6.4.0's
+# configure that 6.0.3 didn't have) -- OMNeT++ 6.4.0 itself now builds
+# cleanly end to end. INET 4.7.0's archive top-level directory name doesn't
+# match the "inetX.Y" guess that worked for 4.5.4, so its extraction is
+# name-agnostic now (see below) rather than another guess.
 # The build is heavy (~20-30 min first time); CI caches it via buildx gha cache.
 FROM ubuntu:22.04
 
@@ -62,9 +58,17 @@ RUN cd "$OMNETPP_ROOT" \
 # ---------------------------------------------------------------------------
 # INET 4.7.0 (release shared library libINET.so).
 # ---------------------------------------------------------------------------
+# Extraction is name-agnostic: 4.5.4's archive top-level directory happened to
+# match the "inetX.Y" guess, but 4.7.0's does not ("No such file or
+# directory" -- confirmed empirically in CI), and a major feature release is
+# exactly where that convention was most likely to change. Extract into a
+# scratch directory and move whatever single top-level directory tar
+# produced, instead of assuming its name.
 ENV INET_ROOT=/opt/inet4.7
-RUN wget -q https://github.com/inet-framework/inet/releases/download/v4.7.0/inet-4.7.0-src.tgz -O /tmp/inet.tgz \
-    && tar xzf /tmp/inet.tgz -C /opt && rm /tmp/inet.tgz
+RUN mkdir -p /opt/inet_extract && wget -q https://github.com/inet-framework/inet/releases/download/v4.7.0/inet-4.7.0-src.tgz -O /tmp/inet.tgz \
+    && tar xzf /tmp/inet.tgz -C /opt/inet_extract \
+    && mv /opt/inet_extract/*/ "$INET_ROOT" \
+    && rm -rf /opt/inet_extract /tmp/inet.tgz
 RUN cd "$INET_ROOT" \
     && source "$OMNETPP_ROOT/setenv" \
     && source setenv \
