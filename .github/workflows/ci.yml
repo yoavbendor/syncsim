@@ -183,26 +183,30 @@ jobs:
             results-gen-minimal/
             results-gen-nominal/
 
-      # ---- C1: pcap(ng) capture + replay round-trip (opt-in capability, not gated by --strict) ----
+      # ---- C1: pcap capture + replay round-trip (opt-in capability, not gated by --strict) ----
       # Not part of the M1-M5 sanity gate: this proves the capture/replay round-trip
-      # actually works end-to-end (capture a real pcapng, then replay it back in as a
+      # actually works end-to-end (capture a real pcap, then replay it back in as a
       # traffic source), it isn't a scenario whose sync/congestion dynamics matter.
-      - name: Capture pcapng from Congestion scenario
+      # --sim-time-limit is passed on the opp_run command line (via run.sh's
+      # EXTRA_OPP_RUN_ARGS), not left to the ini files: an ini-level override
+      # after `include congestion.ini`/`include nominal.ini` did not take
+      # effect (confirmed empirically in CI -- see pcap_capture.ini's note).
+      - name: Capture pcap from Congestion scenario
         run: |
           docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
-            bash scripts/run.sh General simulations/pcap_capture.ini results-pcap-capture
+            bash scripts/run.sh General simulations/pcap_capture.ini results-pcap-capture --sim-time-limit=0.5s
 
-      - name: Replay captured pcapng back into a scenario
+      - name: Replay captured pcap back into a scenario
         run: |
           docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
-            bash scripts/run.sh General simulations/pcap_replay.ini results-pcap-replay
+            bash scripts/run.sh General simulations/pcap_replay.ini results-pcap-replay --sim-time-limit=5s
 
       - name: Verify capture is non-empty and replay actually delivered packets
         run: |
           docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci bash -lc '
             set -e
-            test -s results-pcap-capture/coreClient.pcapng
-            echo "capture OK: $(stat -c%s results-pcap-capture/coreClient.pcapng) bytes"
+            test -s results-pcap-capture/coreClient.pcap
+            echo "capture OK: $(stat -c%s results-pcap-capture/coreClient.pcap) bytes"
             python3 scripts/check_pcap_replay.py results-pcap-replay
           '
 

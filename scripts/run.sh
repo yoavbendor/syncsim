@@ -2,13 +2,17 @@
 # Run a scenario headless with opp_run + the INET shared library.
 # CONFIG is an omnetpp.ini [Config <name>] *section* name (default: General),
 # not the NED network name -- those are two different things.
-# Usage: scripts/run.sh [CONFIG] [INI] [RESULT_DIR]
+# Usage: scripts/run.sh [CONFIG] [INI] [RESULT_DIR] [EXTRA_OPP_RUN_ARGS...]
 #   scripts/run.sh General simulations/minimal.ini results
+#   scripts/run.sh General simulations/pcap_capture.ini results-pcap-capture --sim-time-limit=0.5s
+# EXTRA_OPP_RUN_ARGS pass straight through to opp_run as command-line overrides,
+# which always win regardless of ini include/override ambiguity.
 set -euo pipefail
 
 CONFIG="${1:-General}"
 INI="${2:-simulations/minimal.ini}"
 RESULT_DIR="${3:-results}"
+EXTRA_ARGS=("${@:4}")
 
 : "${INET_ROOT:?INET_ROOT must be set (provided by the Docker image)}"
 
@@ -29,6 +33,7 @@ opp_run \
     --result-dir="$RESULT_DIR" \
     --cmdenv-express-mode=true \
     --cmdenv-status-frequency=10s \
+    "${EXTRA_ARGS[@]}" \
     "$INI"
 
 echo ">> Simulation finished. Results in '$RESULT_DIR':"

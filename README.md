@@ -51,21 +51,26 @@ hand-authored `.ini` blocks layered on top, since those vary per-scenario rather
 part of the topology. Promoting a scenario to run from the generated files is a follow-up
 once this equivalence check has proven itself over more than one commit.
 
-## Optional: pcap(ng) capture + replay
+## Optional: pcap capture + replay
 
 For packet-level debugging (Wireshark/tcpdump-compatible), INET's `PcapRecorder` is already
 built into every TSN node (`LinkLayerNodeBase`'s `recordPcap`/`pcapRecorder[]` slot) -- no
 custom module needed:
 
 ```bash
-docker run --rm -v "$PWD:/work" syncsim bash scripts/run.sh General simulations/pcap_capture.ini results-pcap-capture
+docker run --rm -v "$PWD:/work" syncsim bash scripts/run.sh General simulations/pcap_capture.ini results-pcap-capture --sim-time-limit=0.5s
 ```
 
-captures `coreClient`'s traffic (congestion.ini's topology, 5s) to `coreClient.pcapng`.
-`simulations/pcap_replay.ini` then replays that file back in as a traffic source via
-`PcapFilePacketProducer` (swapped into `UdpSourceApp.source`, the same composition pattern
-`feedback.ini` uses for clock-driven sources) -- proving the capture/replay round-trip
-actually works. **Opt-in only, not part of the M1-M5 scenarios or their `--strict` gate:**
+captures `coreClient`'s traffic (congestion.ini's topology, 0.5s, snaplen 128) to
+`coreClient.pcap`. Classic `pcap` format, not `pcapng`: `PcapRecorder` can write both, but
+`PcapFilePacketProducer` (used for replay) only reads the classic format -- confirmed
+empirically in CI ("Unknown fileheader" on a pcapng file). `--sim-time-limit` is passed on
+the command line rather than the ini file: an override placed after `include congestion.ini`
+did not take effect (also confirmed empirically in CI). `simulations/pcap_replay.ini` then
+replays that file back in as a traffic source via `PcapFilePacketProducer` (swapped into
+`UdpSourceApp.source`, the same composition pattern `feedback.ini` uses for clock-driven
+sources) -- proving the capture/replay round-trip actually works. **Opt-in only, not part of
+the M1-M5 scenarios or their `--strict` gate:**
 full packet capture is exactly the artifact-bloat problem the recording policy above exists
 to avoid, so it stays a deliberate, separate action, not something the main scenarios do
 by default.
