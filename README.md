@@ -9,6 +9,14 @@ the phenomenon under study.**
 
 Built on **OMNeT++ 6.0.3 + INET 4.5.4**, run headless, entirely observable from CI.
 
+> **This branch (`claude/inet-4.7-omnetpp-6.4-migration`) is an exploratory spike**
+> attempting to move to OMNeT++ 6.4.0 + INET 4.7.0. INET 4.6 reimplemented both gPTP
+> and the clock model in a backward-incompatible way, so this is a re-validation
+> project (M1-M5 must be re-verified under the new servo, not assumed equivalent),
+> not a drop-in bump. If it stalls, this branch is abandoned in favor of the proven
+> pin on `claude/sync-simulation-tool-p6ade4` -- see that branch for the working,
+> merged state of everything else (Phases A/B, C1).
+
 ## Visual results (GitHub Pages)
 
 Every CI run publishes a plain-language visual report — per-scenario verdict, a Mermaid

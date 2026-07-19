@@ -1,6 +1,18 @@
 # Headless OMNeT++ + INET simulator image for the gPTP/TSN sync sandbox.
-# Pinned versions (INET 4.5.x requires OMNeT++ 6.0.x):
-#   OMNeT++ 6.0.3, INET 4.5.4  -> ships the Gptp + TSN shaper + clock/oscillator modules we use.
+#
+# MIGRATION SPIKE (branch claude/inet-4.7-omnetpp-6.4-migration): bumping from
+# the proven OMNeT++ 6.0.3 + INET 4.5.4 pin (see claude/sync-simulation-tool-p6ade4)
+# to OMNeT++ 6.4.x + INET 4.7.x. INET 4.6 shipped a backward-incompatible
+# reimplementation of both gPTP (formal state machines, dedicated clock-servo
+# submodule) and the clock model (rewritten arithmetic, femtosecond
+# simtime-resolution needed for accurate 1ppm drift) -- exactly the two
+# subsystems this sandbox studies -- so this is a real re-validation project,
+# not a version bump. Exact asset filenames below are best-effort (matching
+# the established omnetpp-X.Y.Z-linux-x86_64.tgz / vX.Y.Z + inet-X.Y.Z-src.tgz
+# naming convention); this session's network access can't browse GitHub's
+# release-asset listing directly, so the real CI build is what confirms or
+# corrects them -- consistent with how every other version-sensitive detail
+# in this project has been verified.
 # The build is heavy (~20-30 min first time); CI caches it via buildx gha cache.
 FROM ubuntu:22.04
 
@@ -19,12 +31,12 @@ RUN pip3 install --no-cache-dir pandas numpy matplotlib scipy posix_ipc pyyaml
 SHELL ["/bin/bash", "-c"]
 
 # ---------------------------------------------------------------------------
-# OMNeT++ 6.0.3 (headless: no Qtenv, no OSG). `make base` skips the samples.
+# OMNeT++ 6.4.0 (headless: no Qtenv, no OSG). `make base` skips the samples.
 # ---------------------------------------------------------------------------
 ENV OMNETPP_ROOT=/opt/omnetpp
-RUN wget -q https://github.com/omnetpp/omnetpp/releases/download/omnetpp-6.0.3/omnetpp-6.0.3-linux-x86_64.tgz -O /tmp/omnetpp.tgz \
+RUN wget -q https://github.com/omnetpp/omnetpp/releases/download/omnetpp-6.4.0/omnetpp-6.4.0-linux-x86_64.tgz -O /tmp/omnetpp.tgz \
     && mkdir -p /opt && tar xzf /tmp/omnetpp.tgz -C /opt \
-    && mv /opt/omnetpp-6.0.3 "$OMNETPP_ROOT" && rm /tmp/omnetpp.tgz
+    && mv /opt/omnetpp-6.4.0 "$OMNETPP_ROOT" && rm /tmp/omnetpp.tgz
 ENV PATH=$OMNETPP_ROOT/bin:$PATH
 RUN cd "$OMNETPP_ROOT" \
     && source setenv \
@@ -32,10 +44,10 @@ RUN cd "$OMNETPP_ROOT" \
     && make -j"$(nproc)" MODE=release base
 
 # ---------------------------------------------------------------------------
-# INET 4.5.4 (release shared library libINET.so).
+# INET 4.7.0 (release shared library libINET.so).
 # ---------------------------------------------------------------------------
-ENV INET_ROOT=/opt/inet4.5
-RUN wget -q https://github.com/inet-framework/inet/releases/download/v4.5.4/inet-4.5.4-src.tgz -O /tmp/inet.tgz \
+ENV INET_ROOT=/opt/inet4.7
+RUN wget -q https://github.com/inet-framework/inet/releases/download/v4.7.0/inet-4.7.0-src.tgz -O /tmp/inet.tgz \
     && tar xzf /tmp/inet.tgz -C /opt && rm /tmp/inet.tgz
 RUN cd "$INET_ROOT" \
     && source "$OMNETPP_ROOT/setenv" \
