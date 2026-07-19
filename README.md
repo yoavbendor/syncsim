@@ -20,6 +20,37 @@ Mermaid renders the static structure + levers; matplotlib renders the dynamics o
 > **One-time setup (repo admin):** Settings → Pages → Source = **GitHub Actions**, or the
 > deploy step has nothing to publish to. The repo is public, so the report is world-readable.
 
+## Network design: YAML topology model
+
+`configs/topology/*.yaml` is the single source of truth for a network's structure,
+per-node clock drift, and gPTP master/slave roles -- instead of hand-maintaining a `.ned`
+connection list and a matching `gptp.masterPorts` block in parallel (the exact footgun that
+bit the Minimal/Nominal builds: gate numbering follows connection *order*, and getting that
+wrong silently breaks sync roles). `scripts/gen_topology.py` derives from one YAML file:
+
+- the NED network (submodules + connections, with gate/port numbering computed from each
+  link's parent→child direction — the parent side of a link is always a master port, the
+  child side always a slave port, so there is no separate `masterPorts` list to keep in sync)
+- an `.ini` lever fragment (drift rates, `gptp.masterPorts`, link speed)
+- the Mermaid topology diagram used in the Pages report (`scripts/gen_mermaid.py` prefers
+  the YAML model when `configs/topology/<network>.yaml` exists)
+
+```bash
+python3 scripts/gen_topology.py configs/topology/nominal.yaml \
+    --out-ned simulations_gen/Nominal.ned --out-ini simulations_gen/nominal.gen.ini
+```
+
+**De-risked, not yet load-bearing.** CI generates both known networks (Minimal, Nominal)
+from YAML into a separate NED root (`simulations_gen/`, to avoid a duplicate-network-type
+clash with the still-authoritative hand-written files) and runs them, then
+`scripts/verify_topology_equivalence.py` diffs every vector and scalar value against the
+same run using the hand-written `minimal.ned`/`nominal.ned` -- bit-for-bit, not just a text
+diff. The hand-written `.ned`/`.ini` remain what the M1–M5 scenarios actually run; scenario-
+specific levers (queue depth, traffic apps, sweep variables, the recording policy) stay
+hand-authored `.ini` blocks layered on top, since those vary per-scenario rather than being
+part of the topology. Promoting a scenario to run from the generated files is a follow-up
+once this equivalence check has proven itself over more than one commit.
+
 ## Why OMNeT++/INET (decision record)
 
 Three tools each own a different corner of the fidelity triangle, and you cannot cheaply
@@ -65,14 +96,21 @@ regardless of data-plane load -- see the recording-policy comment in `congestion
 
 ```
 Dockerfile                  # headless OMNeT++ + INET image
-.github/workflows/ci.yml    # build image (cached) + run Minimal + archive results
+.github/workflows/ci.yml    # build image (cached) + run scenarios + visual report + Pages deploy
+configs/topology/
+  minimal.yaml / nominal.yaml  # single-source-of-truth topology + clock/gPTP model (Phase B)
 simulations/
   minimal.ned / minimal.ini # M1: GM + 1 bridge + 2 clients, independent drifting clocks
   nominal.ned / nominal.ini # M2: multi-hop -- GM + core switch + 3 zone switches + 13 clients
   congestion.ini            # M3: Nominal topology + finite queues + background UDP traffic
+  feedback.ini              # M4: Nominal topology + clock-driven burst traffic
+  sweep.ini                 # M5: Nominal topology + queue-capacity parameter sweep
 scripts/
-  run.sh                    # opp_run wrapper (headless Cmdenv)
-  analyze.py                # export vectors/scalars -> offset report, sanity checks, congestion summary
+  run.sh / run_sweep.sh     # opp_run wrapper (headless Cmdenv)
+  analyze.py / simdata.py   # export vectors/scalars -> offset report, sanity checks, congestion summary
+  gen_topology.py           # YAML topology -> .ned + .ini lever fragment + Mermaid (Phase B)
+  verify_topology_equivalence.py  # bit-for-bit check: generated vs hand-written network run
+  gen_mermaid.py / plot_results.py / build_site.py  # Phase A visual report -> GitHub Pages
 ```
 
 ## Run locally (any Linux with Docker)

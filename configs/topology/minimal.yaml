@@ -1,0 +1,36 @@
+# Phase B single-source-of-truth topology model for the M1 "Minimal" network.
+# scripts/gen_topology.py turns this into simulations/generated/Minimal.gen.ned,
+# simulations/generated/minimal.gen.ini (clock/gPTP/link levers only -- traffic,
+# queue depth and recording policy stay scenario-specific in the hand-written
+# .ini files, which `include` the generated fragment) and a Mermaid diagram.
+#
+# Link order matters: it reproduces the exact NED gate (eth0/eth1/...) numbering
+# that gptp.masterPorts depends on. List each link as [parent, child], parent
+# closer to the grandmaster -- the generator derives master/slave ports from
+# that direction, so there is no separate masterPorts field to keep in sync.
+network: Minimal
+sim_time_limit: 60s
+link_bitrate: 100Mbps
+
+nodes:
+  - name: gm
+    type: TsnClock
+    role: gm
+    drift: 0ppm
+  - name: sw
+    type: TsnSwitch
+    role: switch
+    drift: 80ppm
+  - name: client1
+    type: TsnDevice
+    role: client
+    drift: 200ppm
+  - name: client2
+    type: TsnDevice
+    role: client
+    drift: -350ppm
+
+links:
+  - [gm, sw]
+  - [sw, client1]
+  - [sw, client2]

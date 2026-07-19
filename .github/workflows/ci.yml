@@ -133,6 +133,56 @@ jobs:
           name: sweep-results
           path: results-sweep/
 
+      # ---- Phase B: YAML topology DSL de-risk check ----
+      # configs/topology/*.yaml is the new single source of truth for network
+      # structure/clock-drift/gPTP roles; scripts/gen_topology.py derives the
+      # .ned + .ini lever fragment from it. Before switching any scenario over
+      # to generated files, prove the generator reproduces the exact same
+      # deterministic simulation as the hand-written minimal.ned/nominal.ned:
+      # generate into a separate NED root (simulations_gen/, avoiding a
+      # duplicate-network-type clash with the hand-written files still in
+      # simulations/), run both networks, and diff every vector/scalar value
+      # against the M1/M2 runs already archived above.
+      - name: Generate topology from YAML (Phase B)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci bash -lc '
+            set -e
+            mkdir -p simulations_gen
+            python3 scripts/gen_topology.py configs/topology/minimal.yaml --out-ned simulations_gen/Minimal.ned --out-ini simulations_gen/minimal.gen.ini
+            python3 scripts/gen_topology.py configs/topology/nominal.yaml --out-ned simulations_gen/Nominal.ned --out-ini simulations_gen/nominal.gen.ini
+          '
+
+      - name: Run generated Minimal + Nominal networks
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci bash -lc '
+            set -e
+            mkdir -p results-gen-minimal results-gen-nominal
+            RD1="$(cd results-gen-minimal && pwd)"
+            RD2="$(cd results-gen-nominal && pwd)"
+            opp_run -l "$INET_ROOT/src/INET" -n "$INET_ROOT/src:simulations_gen" -u Cmdenv -c General -r 0 \
+              --result-dir="$RD1" --cmdenv-express-mode=true --cmdenv-status-frequency=10s simulations_gen/minimal.gen.ini
+            opp_run -l "$INET_ROOT/src/INET" -n "$INET_ROOT/src:simulations_gen" -u Cmdenv -c General -r 0 \
+              --result-dir="$RD2" --cmdenv-express-mode=true --cmdenv-status-frequency=10s simulations_gen/nominal.gen.ini
+          '
+
+      - name: Verify generated networks are bit-for-bit equivalent to hand-written
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci bash -lc '
+            set -e
+            python3 scripts/verify_topology_equivalence.py results results-gen-minimal
+            python3 scripts/verify_topology_equivalence.py results-nominal results-gen-nominal
+          '
+
+      - name: Archive generated-network results (Phase B debug aid)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-topology-results
+          path: |
+            simulations_gen/
+            results-gen-minimal/
+            results-gen-nominal/
+
       # ---- Phase A: visual report -> GitHub Pages ----
       # All result dirs (results, results-nominal, ...) persist in the workspace
       # across steps, so one step turns them all into site/index.html.

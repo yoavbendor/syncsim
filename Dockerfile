@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Python analysis stack (used by scripts/analyze.py) plus scipy/posix_ipc, which
 # OMNeT++'s `configure` hard-requires even for a headless `make base` build
 # (it checks for the IDE's Python deps unconditionally).
-RUN pip3 install --no-cache-dir pandas numpy matplotlib scipy posix_ipc
+RUN pip3 install --no-cache-dir pandas numpy matplotlib scipy posix_ipc pyyaml
 
 SHELL ["/bin/bash", "-c"]
 

@@ -1,0 +1,63 @@
+# Phase B single-source-of-truth topology model for the M2+ "Nominal" network
+# (used by nominal/congestion/feedback/sweep .ini, which differ only in
+# traffic/queue/recording levers, not topology). See minimal.yaml for the
+# generator contract; count_param lets a vector submodule size be an NED
+# parameter (clientsPerZone) instead of a literal, matching the hand-written
+# nominal.ned so the generator output is structurally equivalent to it.
+network: Nominal
+sim_time_limit: 60s
+link_bitrate: 100Mbps
+
+params:
+  clientsPerZone: 4
+
+nodes:
+  - name: gm
+    type: TsnClock
+    role: gm
+    drift: 0ppm
+  - name: swCore
+    type: TsnSwitch
+    role: switch
+    drift: 50ppm
+  - name: coreClient
+    type: TsnDevice
+    role: client
+    drift: 150ppm
+  - name: swA
+    type: TsnSwitch
+    role: switch
+    drift: 80ppm
+  - name: swB
+    type: TsnSwitch
+    role: switch
+    drift: -60ppm
+  - name: swC
+    type: TsnSwitch
+    role: switch
+    drift: 100ppm
+  - name: clientsA
+    type: TsnDevice
+    role: client
+    count_param: clientsPerZone
+    drift: "uniform(-200ppm, 200ppm)"
+  - name: clientsB
+    type: TsnDevice
+    role: client
+    count_param: clientsPerZone
+    drift: "uniform(-200ppm, 200ppm)"
+  - name: clientsC
+    type: TsnDevice
+    role: client
+    count_param: clientsPerZone
+    drift: "uniform(-200ppm, 200ppm)"
+
+links:
+  - [gm, swCore]
+  - [swCore, coreClient]
+  - [swCore, swA]
+  - [swCore, swB]
+  - [swCore, swC]
+  - [swA, clientsA]
+  - [swB, clientsB]
+  - [swC, clientsC]

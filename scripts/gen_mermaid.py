@@ -2,11 +2,13 @@
 """
 Generate a Mermaid topology-with-levers diagram for a scenario.
 
-Phase A: a small explicit map of the two known networks (Minimal, Nominal),
-with lever values (per-node clock drift, per-switch queue capacity, link
-speed, which clients are traffic senders) parsed from the scenario's .ini.
-Phase B's YAML generator will supersede this by emitting the diagram directly
-from the single-source-of-truth model.
+Phase B: if configs/topology/<network>.yaml exists, node/edge structure and
+per-node drift come from that single-source-of-truth model (via
+gen_topology.build_mermaid) instead of the hardcoded TOPOLOGIES map below --
+the YAML file is now the ground truth for structure. Queue capacity and
+sender detection stay scenario-specific, so they are still parsed from the
+scenario's .ini either way. TOPOLOGIES remains as a fallback for any network
+that hasn't been transcribed to YAML yet.
 
 Returns both the Mermaid source (for the page) and a parsed-levers dict (for a
 companion parameter table), so the picture and the numbers stay in sync.
@@ -15,6 +17,8 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # node id -> role; edges as (parent, child), GM-rootward parent first.
 TOPOLOGIES: dict[str, dict] = {
@@ -95,8 +99,27 @@ def link_speed(params) -> str:
 
 
 def build_mermaid(network: str, ini_path: Path) -> tuple[str, dict]:
-    topo = TOPOLOGIES[network]
+    yaml_path = _REPO_ROOT / "configs" / "topology" / f"{network.lower()}.yaml"
     params = parse_ini(ini_path)
+    if yaml_path.exists():
+        import gen_topology
+        model = gen_topology.load_model(yaml_path)
+        sender_names = set()
+        for n in model["nodes"]:
+            is_vec = "count" in n or "count_param" in n
+            rep = f"{n['name']}[0]" if is_vec else n["name"]
+            if is_sender(params, rep):
+                sender_names.add(n["name"])
+        mermaid, levers = gen_topology.build_mermaid(model, sender_names)
+        levers["switch queue capacity"] = queue_cap(params)
+        levers["senders"] = (
+            [f"{n['name']}[*]" if ("count" in n or "count_param" in n) else n["name"]
+             for n in model["nodes"] if n["name"] in sender_names]
+            or ["none"]
+        )
+        return mermaid, levers
+
+    topo = TOPOLOGIES[network]
     speed = link_speed(params)
     cap = queue_cap(params)
 
