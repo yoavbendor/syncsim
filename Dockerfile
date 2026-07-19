@@ -12,7 +12,10 @@
 # naming convention); this session's network access can't browse GitHub's
 # release-asset listing directly, so the real CI build is what confirms or
 # corrects them -- consistent with how every other version-sensitive detail
-# in this project has been verified.
+# in this project has been verified. First build attempt confirmed the asset
+# URLs were right but failed later: OMNeT++ 6.4.0's `configure` hard-requires
+# pkg-config (6.0.3 did not) -- "configure: error: pkg-config program not
+# found" -- added below.
 # The build is heavy (~20-30 min first time); CI caches it via buildx gha cache.
 FROM ubuntu:22.04
 
@@ -20,7 +23,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential clang lld gdb bison flex perl \
         python3 python3-pip python3-dev \
-        libxml2-dev zlib1g-dev ca-certificates wget xz-utils \
+        libxml2-dev zlib1g-dev ca-certificates wget xz-utils pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 # Python analysis stack (used by scripts/analyze.py) plus scipy/posix_ipc, which
