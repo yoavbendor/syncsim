@@ -48,6 +48,12 @@ RUN wget -q https://github.com/omnetpp/omnetpp/releases/download/omnetpp-6.4.0/o
     && mkdir -p /opt && tar xzf /tmp/omnetpp.tgz -C /opt \
     && mv /opt/omnetpp-6.4.0 "$OMNETPP_ROOT" && rm /tmp/omnetpp.tgz
 ENV PATH=$OMNETPP_ROOT/bin:$PATH
+# 6.4.0's configure checks for IDE-related Python modules (e.g. ipython>=7.0.0)
+# unconditionally, even with WITH_QTENV=no -- "configure: error: Install the
+# missing Python modules and restart the configure script." (6.0.3 did not
+# check for these). Install from OMNeT++'s own bundled requirements file,
+# already present after extracting the archive above, before configuring.
+RUN pip3 install --no-cache-dir -r "$OMNETPP_ROOT/python/requirements.txt"
 RUN cd "$OMNETPP_ROOT" \
     && source setenv \
     && ./configure WITH_QTENV=no WITH_OSG=no WITH_OSGEARTH=no \
