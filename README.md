@@ -51,6 +51,25 @@ hand-authored `.ini` blocks layered on top, since those vary per-scenario rather
 part of the topology. Promoting a scenario to run from the generated files is a follow-up
 once this equivalence check has proven itself over more than one commit.
 
+## Optional: pcap(ng) capture + replay
+
+For packet-level debugging (Wireshark/tcpdump-compatible), INET's `PcapRecorder` is already
+built into every TSN node (`LinkLayerNodeBase`'s `recordPcap`/`pcapRecorder[]` slot) -- no
+custom module needed:
+
+```bash
+docker run --rm -v "$PWD:/work" syncsim bash scripts/run.sh General simulations/pcap_capture.ini results-pcap-capture
+```
+
+captures `coreClient`'s traffic (congestion.ini's topology, 5s) to `coreClient.pcapng`.
+`simulations/pcap_replay.ini` then replays that file back in as a traffic source via
+`PcapFilePacketProducer` (swapped into `UdpSourceApp.source`, the same composition pattern
+`feedback.ini` uses for clock-driven sources) -- proving the capture/replay round-trip
+actually works. **Opt-in only, not part of the M1-M5 scenarios or their `--strict` gate:**
+full packet capture is exactly the artifact-bloat problem the recording policy above exists
+to avoid, so it stays a deliberate, separate action, not something the main scenarios do
+by default.
+
 ## Why OMNeT++/INET (decision record)
 
 Three tools each own a different corner of the fidelity triangle, and you cannot cheaply
@@ -73,6 +92,16 @@ lock-time will not match a production ptp4l build. Milestone 6 adds a `clknetsim
 (real ptp4l on a matched profile) to quantify that gap. Spread-spectrum clocking (SSC) is
 deliberately out of scope — at gPTP's sampling rate it aliases to noise and teaches nothing
 about the system.
+
+**Why pinned to OMNeT++ 6.0.3 + INET 4.5.4 specifically:** not just "a known-good version" --
+INET 4.6 shipped a *second*, backward-incompatible gPTP reimplementation (formal state
+machines, a dedicated clock-servo submodule, different message-timestamping points) plus a
+rewritten clock model requiring femtosecond `simtime-resolution` for accurate 1ppm drift. All
+of M1-M5's verified numbers were produced under the pre-4.6 implementation this pin captures.
+Being on the older reimplementation isn't inherently *more* correct than the newer one -- both
+are still not ptp4l -- so this pin is being actively revisited: an isolated migration spike to
+OMNeT++ 6.4 + INET 4.7 (for its NED-editing/diagramming IDE tooling) is tracked separately and
+will replace this pin if it reaches a green M1-M5 rerun without disproportionate effort.
 
 ## Design principles
 

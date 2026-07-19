@@ -6,6 +6,9 @@ out/
 simulations_gen/
 simulations/*.gen.ned
 simulations/*.gen.ini
+# C1: opt-in pcap(ng) capture output
+*.pcap
+*.pcapng
 *.vec
 *.sca
 *.vci
