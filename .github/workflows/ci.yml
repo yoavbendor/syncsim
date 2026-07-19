@@ -247,6 +247,30 @@ jobs:
             python3 scripts/check_pcap_replay.py results-pcap-replay
           '
 
+      # SyncOnly: gPTP-filtered capture across the *entire* 60s scenario (safe
+      # because the filter, not a short time window, is what keeps this small).
+      # Verifies the filter actually restricts to gPTP -- not just that the
+      # module ran -- by checking the file is real but far smaller than an
+      # unfiltered 0.5s capture already was (coreClient.pcap, ~6MB).
+      - name: Capture gPTP-only pcap (SyncOnly) across the full scenario
+        if: always()
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
+            bash scripts/run.sh SyncOnly simulations/pcap_capture.ini results-pcap-sync
+
+      - name: Verify SyncOnly capture is non-empty and dramatically smaller
+        if: always()
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci bash -lc '
+            set -e
+            test -s results-pcap-sync/coreClient-sync.pcap
+            SYNC_BYTES=$(stat -c%s results-pcap-sync/coreClient-sync.pcap)
+            UNFILTERED_BYTES=$(stat -c%s results-pcap-capture/coreClient.pcap)
+            echo "SyncOnly capture (60s, gptp-filtered): $SYNC_BYTES bytes"
+            echo "Unfiltered capture (0.5s, no filter):  $UNFILTERED_BYTES bytes"
+            test "$SYNC_BYTES" -lt "$UNFILTERED_BYTES"
+          '
+
       - name: Archive pcap capture + replay results
         if: always()
         uses: actions/upload-artifact@v4
@@ -255,3 +279,4 @@ jobs:
           path: |
             results-pcap-capture/
             results-pcap-replay/
+            results-pcap-sync/
