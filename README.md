@@ -61,12 +61,14 @@ custom module needed:
 docker run --rm -v "$PWD:/work" syncsim bash scripts/run.sh General simulations/pcap_capture.ini results-pcap-capture --sim-time-limit=0.5s
 ```
 
-captures `coreClient`'s traffic (congestion.ini's topology, 0.5s, snaplen 128) to
-`coreClient.pcap`. Classic `pcap` format, not `pcapng`: `PcapRecorder` can write both, but
-`PcapFilePacketProducer` (used for replay) only reads the classic format -- confirmed
-empirically in CI ("Unknown fileheader" on a pcapng file). `--sim-time-limit` is passed on
-the command line rather than the ini file: an override placed after `include congestion.ini`
-did not take effect (also confirmed empirically in CI). `simulations/pcap_replay.ini` then
+captures `coreClient`'s traffic (congestion.ini's topology, 0.5s, full frames -- no snaplen
+truncation, since a truncated frame fails to replay: "Returning an incomplete chunk is not
+allowed" deep in the IPv4 layer, confirmed empirically in CI) to `coreClient.pcap`. Classic
+`pcap` format, not `pcapng`: `PcapRecorder` can write both, but `PcapFilePacketProducer`
+(used for replay) only reads the classic format -- confirmed empirically in CI ("Unknown
+fileheader" on a pcapng file). `--sim-time-limit` is passed on the command line rather than
+the ini file: an override placed after `include congestion.ini` did not take effect (also
+confirmed empirically in CI). `simulations/pcap_replay.ini` then
 replays that file back in as a traffic source via `PcapFilePacketProducer` (swapped into
 `UdpSourceApp.source`, the same composition pattern `feedback.ini` uses for clock-driven
 sources) -- proving the capture/replay round-trip actually works. **Opt-in only, not part of
