@@ -18,11 +18,16 @@ concurrency:
 
 jobs:
   build-and-smoke:
+    # No `environment:` here deliberately: a job that declares one is gated
+    # by that environment's deployment-branch protection rules *before any
+    # step runs* (GitHub creates the deployment the instant the job starts,
+    # not when a step touches it) -- confirmed empirically in CI, where a
+    # push to a non-Pages-source branch (claude/inet-4.7-omnetpp-6.4-migration)
+    # failed in under 3 seconds with zero steps executed and no runner ever
+    # assigned. The M1-M5/Phase B/C1 smoke tests must run on every branch, so
+    # the environment-gated Pages deploy is split into its own job below.
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -198,16 +203,11 @@ jobs:
             python3 scripts/build_site.py --site site
           '
 
-      - name: Upload Pages artifact
-        if: github.ref == 'refs/heads/claude/sync-simulation-tool-p6ade4'
-        uses: actions/upload-pages-artifact@v3
+      - name: Upload site/ as a plain artifact (for the deploy-pages job)
+        uses: actions/upload-artifact@v4
         with:
+          name: site-build
           path: site/
-
-      - name: Deploy to GitHub Pages
-        if: github.ref == 'refs/heads/claude/sync-simulation-tool-p6ade4'
-        id: deployment
-        uses: actions/deploy-pages@v4
 
       # ---- C1: pcap capture + replay round-trip (opt-in capability, not gated by --strict) ----
       # Not part of the M1-M5 sanity gate: this proves the capture/replay round-trip
@@ -280,3 +280,31 @@ jobs:
             results-pcap-capture/
             results-pcap-replay/
             results-pcap-sync/
+
+  # Separate job, deliberately: this is the only place `environment:
+  # github-pages` is declared, so its branch-protection gate only ever
+  # blocks *this* job (which simply doesn't start on other branches) instead
+  # of the whole pipeline. Runs only on the Pages-source branch; every other
+  # branch/PR still gets the full build-and-smoke run above.
+  deploy-pages:
+    needs: build-and-smoke
+    if: github.ref == 'refs/heads/claude/sync-simulation-tool-p6ade4'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download site/ build from build-and-smoke
+        uses: actions/download-artifact@v4
+        with:
+          name: site-build
+          path: site/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
