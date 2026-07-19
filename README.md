@@ -83,17 +83,23 @@ by default.
 docker run --rm -v "$PWD:/work" syncsim bash scripts/run.sh SyncOnly simulations/pcap_capture.ini results-pcap-sync
 ```
 
-`PcapRecorder` doesn't parse BPF/tcpdump filter syntax -- its `dumpProtocols` parameter is a
-space-separated list of names from INET's own `Protocol` registry, matched against each
-recorded frame's actual protocol tag. gPTP is registered there as `Protocol::gptp("gptp",
-"gPTP")` (IEEE 802.1AS, EtherType 0x88F7), so `dumpProtocols = "gptp"` is the INET-native
-equivalent of a tcpdump ether-type filter. Because gPTP's sync/pdelay traffic is a handful of
-messages per second -- vanishingly small next to congestion.ini's ~18.75k pkt/s UDP
-background -- this capture is safe across the **entire** 60s scenario (unlike the unfiltered
-capture above, which must stay under ~1s to avoid a multi-hundred-MB file): you get the full
-picture of how sync/pdelay messages behave while congestion builds, which is the actual
-research signal this project cares about (see the recording-policy principle below: gPTP
-signals are always fully recorded, regardless of data-plane load).
+`PcapRecorder` doesn't parse BPF/tcpdump filter syntax. Its `dumpProtocols` parameter looked
+like the right lever (a list of names from INET's `Protocol` registry, and gPTP is registered
+there as `Protocol::gptp("gptp", "gPTP")`, IEEE 802.1AS / EtherType 0x88F7) but isn't: it
+checks a frame's protocol tag exactly as it stands at the interface signal point, which for a
+real Ethernet frame is the *outer* link-layer protocol (`"ethernetmac"`, its own default) --
+gPTP is the inner payload, so `dumpProtocols = "gptp"` matched nothing and produced a 0-byte
+file (confirmed empirically in CI). The actual payload-level filter is `packetFilter`, INET's
+generic packet-content matcher (cMatchExpression format, shared with INET's visualizers/packet
+filters), via `expr(has(ChunkType))` against the real gPTP message classes:
+`packetFilter = "expr(has(GptpSync) or has(GptpFollowUp) or has(GptpPdelayReq) or has(GptpPdelayResp) or has(GptpPdelayRespFollowUp) or has(GptpAnnounce))"`.
+Because gPTP's sync/pdelay traffic is a handful of messages per second -- vanishingly small
+next to congestion.ini's ~18.75k pkt/s UDP background -- this capture is safe across the
+**entire** 60s scenario (unlike the unfiltered capture above, which must stay under ~1s to
+avoid a multi-hundred-MB file): you get the full picture of how sync/pdelay messages behave
+while congestion builds, which is the actual research signal this project cares about (see
+the recording-policy principle below: gPTP signals are always fully recorded, regardless of
+data-plane load).
 
 ## Why OMNeT++/INET (decision record)
 

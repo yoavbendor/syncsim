@@ -288,7 +288,14 @@ jobs:
   # branch/PR still gets the full build-and-smoke run above.
   deploy-pages:
     needs: build-and-smoke
-    if: github.ref == 'refs/heads/claude/sync-simulation-tool-p6ade4'
+    # `needs:` alone implies "only if build-and-smoke succeeded" -- but a
+    # later, unrelated step failing (e.g. the C1 pcap experiment) still fails
+    # the whole job even though the site/ artifact upload earlier in it
+    # already succeeded. `always()` overrides that implicit requirement so a
+    # downstream failure in build-and-smoke can no longer skip the deploy --
+    # confirmed empirically in CI (deploy-pages was skipped this way even
+    # though "Upload site/ as a plain artifact" had already succeeded).
+    if: always() && github.ref == 'refs/heads/claude/sync-simulation-tool-p6ade4'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
