@@ -100,7 +100,10 @@ gPTP is the inner payload, so `dumpProtocols = "gptp"` matched nothing and produ
 file (confirmed empirically in CI). The actual payload-level filter is `packetFilter`, INET's
 generic packet-content matcher (cMatchExpression format, shared with INET's visualizers/packet
 filters), via `expr(has(ChunkType))` against the real gPTP message classes:
-`packetFilter = "expr(has(GptpSync) or has(GptpFollowUp) or has(GptpPdelayReq) or has(GptpPdelayResp) or has(GptpPdelayRespFollowUp) or has(GptpAnnounce))"`.
+`packetFilter = "expr(has(GptpSync)) or expr(has(GptpFollowUp)) or expr(has(GptpPdelayReq)) or expr(has(GptpPdelayResp)) or expr(has(GptpPdelayRespFollowUp)) or expr(has(GptpAnnounce))"`
+(each `has(...)` inside its own `expr(...)`, combined with top-level `or` -- combining them
+inside one `expr(...)` produced `cMatchExpression: Parse error in match expression: syntax
+error`, confirmed empirically in CI).
 Because gPTP's sync/pdelay traffic is a handful of messages per second -- vanishingly small
 next to congestion.ini's ~18.75k pkt/s UDP background -- this capture is safe across the
 **entire** 60s scenario (unlike the unfiltered capture above, which must stay under ~1s to
