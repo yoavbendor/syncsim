@@ -133,7 +133,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         xvfb x11vnc novnc websockify fluxbox xterm x11-utils \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --no-cache-dir --break-system-packages \
+# --ignore-installed: novnc pulls in apt's python3-numpy (a debian-packaged
+# dist-packages install with no RECORD file), which plain pip install then
+# fails to uninstall ("RECORD file not found") when it tries to upgrade it --
+# confirmed empirically on this image. --ignore-installed skips that
+# uninstall step and just shadows it with pip's own copy.
+RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed \
         pandas numpy matplotlib scipy posix_ipc pyyaml
 
 SHELL ["/bin/bash", "-c"]
@@ -143,7 +148,7 @@ RUN wget -q https://github.com/omnetpp/omnetpp/releases/download/omnetpp-6.4.0/o
     && mkdir -p /opt && tar xzf /tmp/omnetpp.tgz -C /opt \
     && mv /opt/omnetpp-6.4.0 "$OMNETPP_ROOT" && rm /tmp/omnetpp.tgz
 ENV PATH=$OMNETPP_ROOT/bin:$PATH
-RUN pip3 install --no-cache-dir --break-system-packages -r "$OMNETPP_ROOT/python/requirements.txt"
+RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed -r "$OMNETPP_ROOT/python/requirements.txt"
 
 ENV INET_ROOT=/opt/inet4.7
 RUN mkdir -p /opt/inet_extract && wget -q https://github.com/inet-framework/inet/releases/download/v4.7.0/inet-4.7.0-src.tgz -O /tmp/inet.tgz \
