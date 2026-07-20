@@ -38,6 +38,11 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
+          # Explicit, not relying on "last stage wins": the Dockerfile also
+          # defines `gui`/`ide` targets (Qtenv + a browser-accessible virtual
+          # desktop) for local interactive use, which CI must never build --
+          # they add real time/size for a capability M1-M5 never exercises.
+          target: headless
           load: true
           tags: syncsim:ci
           cache-from: type=gha

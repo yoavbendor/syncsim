@@ -1,25 +1,39 @@
-# Headless OMNeT++ + INET simulator image for the gPTP/TSN sync sandbox.
+# OMNeT++ + INET simulator image for the gPTP/TSN sync sandbox, in three
+# build targets sharing one Dockerfile:
 #
-# MIGRATION SPIKE (branch claude/inet-4.7-omnetpp-6.4-migration): bumping from
-# the proven OMNeT++ 6.0.3 + INET 4.5.4 pin (see claude/sync-simulation-tool-p6ade4)
-# to OMNeT++ 6.4.x + INET 4.7.x. INET 4.6 shipped a backward-incompatible
-# reimplementation of both gPTP (formal state machines, dedicated clock-servo
-# submodule) and the clock model (rewritten arithmetic, femtosecond
-# simtime-resolution needed for accurate 1ppm drift) -- exactly the two
-# subsystems this sandbox studies -- so this is a real re-validation project,
-# not a version bump. Exact asset filenames below are best-effort (matching
-# the established omnetpp-X.Y.Z-linux-x86_64.tgz / vX.Y.Z + inet-X.Y.Z-src.tgz
-# naming convention); this session's network access can't browse GitHub's
-# release-asset listing directly, so the real CI build is what confirms or
-# corrects them -- consistent with how every other version-sensitive detail
-# in this project has been verified. Iterated through pkg-config, then
-# ipython/python/requirements.txt (both new hard requirements of 6.4.0's
-# configure that 6.0.3 didn't have) -- OMNeT++ 6.4.0 itself now builds
-# cleanly end to end. INET 4.7.0's archive top-level directory name doesn't
-# match the "inetX.Y" guess that worked for 4.5.4, so its extraction is
-# name-agnostic now (see below) rather than another guess.
-# The build is heavy (~20-30 min first time); CI caches it via buildx gha cache.
-FROM ubuntu:22.04
+#   headless (default) -- Cmdenv only, no Qt/X11 in the image at all. What
+#                          CI builds (see .github/workflows/ci.yml's explicit
+#                          `target: headless`) and what every scripts/run.sh
+#                          invocation uses. Byte-for-byte the same recipe
+#                          this Dockerfile has always used.
+#   gui                -- adds Qtenv (WITH_QTENV=yes) plus a self-contained
+#                          Xvfb/x11vnc/noVNC virtual desktop, so a running
+#                          simulation is watchable from a browser tab with
+#                          zero host-side X11 forwarding or VNC client setup.
+#   ide                -- adds the full OMNeT++ IDE (Eclipse-based NED
+#                          editor/diagrammer) on top of `gui`, for learning/
+#                          editing .ned files interactively rather than just
+#                          watching a run.
+#
+# CI never builds `gui`/`ide` -- they cost nothing in CI build time or image
+# size. Build them explicitly when wanted:
+#   docker build --target gui -t syncsim:gui .
+#   docker build --target ide -t syncsim:ide .
+#
+# Pinned versions (INET 4.7.x requires OMNeT++ 6.4.x):
+#   OMNeT++ 6.4.0, INET 4.7.0 -> ships the Gptp + TSN shaper + clock/oscillator
+#   modules this project uses, under INET's post-4.6 reimplementation of both
+#   (see README's "Why pinned to..." section for the migration history).
+# The build is heavy (~20-30 min first time for `headless`; `gui`/`ide` add
+# more on top). CI caches `headless` via buildx gha cache.
+
+# =============================================================================
+# Stage: base-deps -- apt/pip layer + OMNeT++/INET source, shared by all three
+# final targets. Left unconfigured/unbuilt here because `headless` and `gui`
+# diverge on `./configure`'s WITH_QTENV flag, so each final stage runs its own
+# configure+make base -- this stage only avoids re-downloading the sources.
+# =============================================================================
+FROM ubuntu:22.04 AS base-deps
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -36,9 +50,6 @@ RUN pip3 install --no-cache-dir pandas numpy matplotlib scipy posix_ipc pyyaml
 
 SHELL ["/bin/bash", "-c"]
 
-# ---------------------------------------------------------------------------
-# OMNeT++ 6.4.0 (headless: no Qtenv, no OSG). `make base` skips the samples.
-# ---------------------------------------------------------------------------
 ENV OMNETPP_ROOT=/opt/omnetpp
 RUN wget -q https://github.com/omnetpp/omnetpp/releases/download/omnetpp-6.4.0/omnetpp-6.4.0-linux-x86_64.tgz -O /tmp/omnetpp.tgz \
     && mkdir -p /opt && tar xzf /tmp/omnetpp.tgz -C /opt \
@@ -50,14 +61,7 @@ ENV PATH=$OMNETPP_ROOT/bin:$PATH
 # check for these). Install from OMNeT++'s own bundled requirements file,
 # already present after extracting the archive above, before configuring.
 RUN pip3 install --no-cache-dir -r "$OMNETPP_ROOT/python/requirements.txt"
-RUN cd "$OMNETPP_ROOT" \
-    && source setenv \
-    && ./configure WITH_QTENV=no WITH_OSG=no WITH_OSGEARTH=no \
-    && make -j"$(nproc)" MODE=release base
 
-# ---------------------------------------------------------------------------
-# INET 4.7.0 (release shared library libINET.so).
-# ---------------------------------------------------------------------------
 # Extraction is name-agnostic: 4.5.4's archive top-level directory happened to
 # match the "inetX.Y" guess, but 4.7.0's does not ("No such file or
 # directory" -- confirmed empirically in CI), and a major feature release is
@@ -69,6 +73,18 @@ RUN mkdir -p /opt/inet_extract && wget -q https://github.com/inet-framework/inet
     && tar xzf /tmp/inet.tgz -C /opt/inet_extract \
     && mv /opt/inet_extract/*/ "$INET_ROOT" \
     && rm -rf /opt/inet_extract /tmp/inet.tgz
+
+# =============================================================================
+# Stage: headless (default target) -- what CI builds and every scripts/run.sh
+# invocation uses. No Qtenv, no OSG, no X11 anywhere in this image.
+# =============================================================================
+FROM base-deps AS headless
+
+RUN cd "$OMNETPP_ROOT" \
+    && source setenv \
+    && ./configure WITH_QTENV=no WITH_OSG=no WITH_OSGEARTH=no \
+    && make -j"$(nproc)" MODE=release base
+
 RUN cd "$INET_ROOT" \
     && source "$OMNETPP_ROOT/setenv" \
     && source setenv \
@@ -79,3 +95,83 @@ RUN cd "$INET_ROOT" \
 ENV LD_LIBRARY_PATH=$INET_ROOT/src:$OMNETPP_ROOT/lib
 ENV NEDPATH=$INET_ROOT/src
 WORKDIR /work
+
+# =============================================================================
+# Stage: gui -- Qtenv (WITH_QTENV=yes) + a throwaway Xvfb/x11vnc/noVNC desktop.
+# Local/interactive use only; never built by CI.
+# =============================================================================
+FROM base-deps AS gui
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        qt6-base-dev qt6-base-dev-tools libgl1-mesa-dev libglu1-mesa-dev \
+        xvfb x11vnc novnc websockify fluxbox xterm x11-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Same `make base` recipe as the headless stage, not the full `make`: with
+# WITH_QTENV=yes, `base`'s target list picks up `qtenv` automatically (see
+# OMNeT++'s top-level Makefile: `ifeq "$(WITH_QTENV)" "yes" ... BASE+= qtenv`),
+# so `make base` alone already links a Qtenv-capable opp_run -- confirmed
+# empirically by building both ways: plain `make` (no target) additionally
+# compiles all 20 bundled samples (osg-earth, petrinets, tictoc, ...) this
+# image has no use for and gains nothing from, while `make base` here costs
+# the same incremental time as the headless build's `make base` plus Qtenv
+# itself (~1 more compile unit, `layout`).
+RUN cd "$OMNETPP_ROOT" \
+    && source setenv \
+    && ./configure WITH_QTENV=yes WITH_OSG=no WITH_OSGEARTH=no \
+    && make -j"$(nproc)" MODE=release base
+
+RUN cd "$INET_ROOT" \
+    && source "$OMNETPP_ROOT/setenv" \
+    && source setenv \
+    && make makefiles \
+    && make -j"$(nproc)" MODE=release
+
+ENV LD_LIBRARY_PATH=$INET_ROOT/src:$OMNETPP_ROOT/lib
+ENV NEDPATH=$INET_ROOT/src
+
+COPY docker/desktop-entrypoint.sh /usr/local/bin/desktop-entrypoint.sh
+RUN chmod +x /usr/local/bin/desktop-entrypoint.sh
+
+# Matches the Xvfb display the entrypoint starts. AUTOSTART_APP is unset here
+# (plain terminal only); the `ide` stage below overrides it.
+ENV DISPLAY=:99
+ENV AUTOSTART_APP=
+
+EXPOSE 6080
+WORKDIR /work
+ENTRYPOINT ["/usr/local/bin/desktop-entrypoint.sh"]
+CMD ["bash"]
+
+# =============================================================================
+# Stage: ide -- the full OMNeT++ IDE (Eclipse-based NED editor/diagrammer) on
+# top of `gui`'s Qtenv + virtual desktop, auto-started in that desktop.
+# =============================================================================
+FROM gui AS ide
+
+# The IDE's Eclipse RCP bundle should carry its own embedded JRE (standard
+# for OMNeT++'s prebuilt IDE downloads), but this Dockerfile isn't itself
+# CI-exercised for this target -- a headless system JRE is cheap insurance
+# against that assumption being wrong for this specific release, rather than
+# a whole broken tier discovered only when someone actually tries it.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        default-jre-headless \
+    && rm -rf /var/lib/apt/lists/*
+
+# The generic Linux release tarball extracted in base-deps ships a prebuilt
+# IDE (Eclipse RCP with its own bundled JRE) at $OMNETPP_ROOT/ide -- building
+# it from source instead means `make ide`, which shells out to
+# releng/build-omnetpp-ide-linux (a Maven/Tycho build against Eclipse's p2
+# update sites): heavy, network-fragile, and not something this project's
+# CI-verified-assumptions style should gamble on for a Dockerfile that isn't
+# CI-exercised itself. Fail loudly here rather than silently shipping a
+# broken "ide" tier if that assumption turns out wrong for this release.
+RUN test -d "$OMNETPP_ROOT/ide" || { \
+        echo "ERROR: \$OMNETPP_ROOT/ide not found in the generic release tarball."; \
+        echo "Fallback: build it from source with 'make ide' (needs a JDK + Maven"; \
+        echo "+ network access to Eclipse's p2 update sites) inside the omnetpp"; \
+        echo "source tree at \$OMNETPP_ROOT, then retry this stage."; \
+        exit 1; \
+    }
+
+ENV AUTOSTART_APP=omnetpp

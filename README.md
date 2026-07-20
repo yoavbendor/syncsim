@@ -170,8 +170,9 @@ regardless of data-plane load -- see the recording-policy comment in `congestion
 ## Layout
 
 ```
-Dockerfile                  # headless OMNeT++ + INET image
-.github/workflows/ci.yml    # build image (cached) + run scenarios + visual report + Pages deploy
+Dockerfile                  # 3 targets: headless (CI/default), gui (Qtenv + noVNC), ide (+ OMNeT++ IDE)
+docker/desktop-entrypoint.sh # gui/ide entrypoint: Xvfb + fluxbox + x11vnc + noVNC virtual desktop
+.github/workflows/ci.yml    # build image (cached, headless target only) + run scenarios + visual report + Pages deploy
 configs/topology/
   minimal.yaml / nominal.yaml  # single-source-of-truth topology + clock/gPTP model (Phase B)
 simulations/
@@ -194,6 +195,33 @@ scripts/
 docker build -t syncsim .
 docker run --rm -v "$PWD:/work" syncsim bash scripts/run.sh General simulations/minimal.ini results
 docker run --rm -v "$PWD:/work" syncsim python3 scripts/analyze.py results
+```
+
+`docker build -t syncsim .` builds the `headless` target (the Dockerfile's default) --
+identical to what CI builds, no Qt/X11 in the image. This is what every `scripts/run.sh`
+invocation above uses and is the right choice for CI/CD or any non-interactive run.
+
+### Optional: watch it run, or edit NED interactively (GUI/IDE targets)
+
+Two additional, opt-in build targets add a self-contained virtual desktop (Xvfb +
+fluxbox + x11vnc + noVNC), reachable from any browser at `localhost:6080/vnc.html` --
+no host-side X11 forwarding or VNC client needed on Linux, macOS, or Windows alike.
+CI never builds either target (`ci.yml` pins `target: headless` explicitly), so they
+cost nothing in CI time or image size.
+
+```bash
+# gui: Qtenv (the simulation GUI) -- watch a scenario run module-by-module,
+# inspect messages, step through events.
+docker build --target gui -t syncsim:gui .
+docker run --rm -p 6080:6080 -v "$PWD:/work" syncsim:gui
+# open http://localhost:6080/vnc.html, then inside the desktop's terminal:
+opp_run -l "$INET_ROOT/src/INET" -n "$INET_ROOT/src:simulations" -u Qtenv simulations/minimal.ini
+
+# ide: the above, plus the full OMNeT++ IDE (Eclipse-based NED editor +
+# graphical topology diagrammer) -- for learning/editing .ned interactively
+# rather than just watching a run. Auto-starts inside the same desktop.
+docker build --target ide -t syncsim:ide .
+docker run --rm -p 6080:6080 -v "$PWD:/work" syncsim:ide
 ```
 
 ## Milestones
