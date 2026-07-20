@@ -1,14 +1,32 @@
 # Headless OMNeT++ + INET simulator image for the gPTP/TSN sync sandbox.
-# Pinned versions (INET 4.5.x requires OMNeT++ 6.0.x):
-#   OMNeT++ 6.0.3, INET 4.5.4  -> ships the Gptp + TSN shaper + clock/oscillator modules we use.
+#
+# MIGRATION SPIKE (branch claude/inet-4.7-omnetpp-6.4-migration): bumping from
+# the proven OMNeT++ 6.0.3 + INET 4.5.4 pin (see claude/sync-simulation-tool-p6ade4)
+# to OMNeT++ 6.4.x + INET 4.7.x. INET 4.6 shipped a backward-incompatible
+# reimplementation of both gPTP (formal state machines, dedicated clock-servo
+# submodule) and the clock model (rewritten arithmetic, femtosecond
+# simtime-resolution needed for accurate 1ppm drift) -- exactly the two
+# subsystems this sandbox studies -- so this is a real re-validation project,
+# not a version bump. Exact asset filenames below are best-effort (matching
+# the established omnetpp-X.Y.Z-linux-x86_64.tgz / vX.Y.Z + inet-X.Y.Z-src.tgz
+# naming convention); this session's network access can't browse GitHub's
+# release-asset listing directly, so the real CI build is what confirms or
+# corrects them -- consistent with how every other version-sensitive detail
+# in this project has been verified. Iterated through pkg-config, then
+# ipython/python/requirements.txt (both new hard requirements of 6.4.0's
+# configure that 6.0.3 didn't have) -- OMNeT++ 6.4.0 itself now builds
+# cleanly end to end. INET 4.7.0's archive top-level directory name doesn't
+# match the "inetX.Y" guess that worked for 4.5.4, so its extraction is
+# name-agnostic now (see below) rather than another guess.
 # The build is heavy (~20-30 min first time); CI caches it via buildx gha cache.
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential clang lld gdb bison flex perl \
-        python3 python3-pip python3-dev \
-        libxml2-dev zlib1g-dev ca-certificates wget xz-utils \
+        build-essential clang lld gdb bison flex perl ccache \
+        python3 python3-pip python3-dev python3-venv \
+        libxml2-dev zlib1g-dev ca-certificates wget xz-utils pkg-config \
+        doxygen graphviz xdg-utils libdw-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Python analysis stack (used by scripts/analyze.py) plus scipy/posix_ipc, which
@@ -19,24 +37,38 @@ RUN pip3 install --no-cache-dir pandas numpy matplotlib scipy posix_ipc pyyaml
 SHELL ["/bin/bash", "-c"]
 
 # ---------------------------------------------------------------------------
-# OMNeT++ 6.0.3 (headless: no Qtenv, no OSG). `make base` skips the samples.
+# OMNeT++ 6.4.0 (headless: no Qtenv, no OSG). `make base` skips the samples.
 # ---------------------------------------------------------------------------
 ENV OMNETPP_ROOT=/opt/omnetpp
-RUN wget -q https://github.com/omnetpp/omnetpp/releases/download/omnetpp-6.0.3/omnetpp-6.0.3-linux-x86_64.tgz -O /tmp/omnetpp.tgz \
+RUN wget -q https://github.com/omnetpp/omnetpp/releases/download/omnetpp-6.4.0/omnetpp-6.4.0-linux-x86_64.tgz -O /tmp/omnetpp.tgz \
     && mkdir -p /opt && tar xzf /tmp/omnetpp.tgz -C /opt \
-    && mv /opt/omnetpp-6.0.3 "$OMNETPP_ROOT" && rm /tmp/omnetpp.tgz
+    && mv /opt/omnetpp-6.4.0 "$OMNETPP_ROOT" && rm /tmp/omnetpp.tgz
 ENV PATH=$OMNETPP_ROOT/bin:$PATH
+# 6.4.0's configure checks for IDE-related Python modules (e.g. ipython>=7.0.0)
+# unconditionally, even with WITH_QTENV=no -- "configure: error: Install the
+# missing Python modules and restart the configure script." (6.0.3 did not
+# check for these). Install from OMNeT++'s own bundled requirements file,
+# already present after extracting the archive above, before configuring.
+RUN pip3 install --no-cache-dir -r "$OMNETPP_ROOT/python/requirements.txt"
 RUN cd "$OMNETPP_ROOT" \
     && source setenv \
     && ./configure WITH_QTENV=no WITH_OSG=no WITH_OSGEARTH=no \
     && make -j"$(nproc)" MODE=release base
 
 # ---------------------------------------------------------------------------
-# INET 4.5.4 (release shared library libINET.so).
+# INET 4.7.0 (release shared library libINET.so).
 # ---------------------------------------------------------------------------
-ENV INET_ROOT=/opt/inet4.5
-RUN wget -q https://github.com/inet-framework/inet/releases/download/v4.5.4/inet-4.5.4-src.tgz -O /tmp/inet.tgz \
-    && tar xzf /tmp/inet.tgz -C /opt && rm /tmp/inet.tgz
+# Extraction is name-agnostic: 4.5.4's archive top-level directory happened to
+# match the "inetX.Y" guess, but 4.7.0's does not ("No such file or
+# directory" -- confirmed empirically in CI), and a major feature release is
+# exactly where that convention was most likely to change. Extract into a
+# scratch directory and move whatever single top-level directory tar
+# produced, instead of assuming its name.
+ENV INET_ROOT=/opt/inet4.7
+RUN mkdir -p /opt/inet_extract && wget -q https://github.com/inet-framework/inet/releases/download/v4.7.0/inet-4.7.0-src.tgz -O /tmp/inet.tgz \
+    && tar xzf /tmp/inet.tgz -C /opt/inet_extract \
+    && mv /opt/inet_extract/*/ "$INET_ROOT" \
+    && rm -rf /opt/inet_extract /tmp/inet.tgz
 RUN cd "$INET_ROOT" \
     && source "$OMNETPP_ROOT/setenv" \
     && source setenv \

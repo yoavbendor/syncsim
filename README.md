@@ -9,6 +9,18 @@ the phenomenon under study.**
 
 Built on **OMNeT++ 6.0.3 + INET 4.5.4**, run headless, entirely observable from CI.
 
+> **This branch (`claude/inet-4.7-omnetpp-6.4-migration`) is a migration spike,
+> now confirmed green.** M1-M5 all pass in real CI against OMNeT++ 6.4.0 + INET
+> 4.7.0 -- five well-understood ini/script fixes were needed (mandatory
+> `oscillator.nominalTickLength`, `simtime-resolution = fs`, streaming-mode PHY
+> submodules for Gptp's new timestamping, Ipv4's renamed `checksumMode`, and
+> deriving offset-from-GM from `clock.timeChanged` since `gptp.timeDifference`
+> was removed -- see `MIGRATION_HANDOFF.md`), but **zero NED changes**. Phase
+> B's YAML topology generator needed the same three ini-emission fixes and now
+> passes too. If a later check surfaces a real regression, this note and
+> `claude/sync-simulation-tool-p6ade4` (the proven 6.0.3/4.5.4 pin) remain the
+> fallback.
+
 ## Visual results (GitHub Pages)
 
 Every CI run publishes a plain-language visual report — per-scenario verdict, a Mermaid

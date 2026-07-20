@@ -21,14 +21,14 @@ _NUM_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 # used as the expected-signal manifest for analyze.py's --strict sanity check.
 HOP_MAPS = {
     "Minimal": [
-        (re.compile(r"^Minimal\.sw\.gptp$"), 1),
-        (re.compile(r"^Minimal\.client\d+\.gptp$"), 2),
+        (re.compile(r"^Minimal\.sw\.clock$"), 1),
+        (re.compile(r"^Minimal\.client\d+\.clock$"), 2),
     ],
     "Nominal": [
-        (re.compile(r"^Nominal\.swCore\.gptp$"), 1),
-        (re.compile(r"^Nominal\.coreClient\.gptp$"), 2),
-        (re.compile(r"^Nominal\.sw[ABC]\.gptp$"), 2),
-        (re.compile(r"^Nominal\.clients[ABC]\[\d+\]\.gptp$"), 3),
+        (re.compile(r"^Nominal\.swCore\.clock$"), 1),
+        (re.compile(r"^Nominal\.coreClient\.clock$"), 2),
+        (re.compile(r"^Nominal\.sw[ABC]\.clock$"), 2),
+        (re.compile(r"^Nominal\.clients[ABC]\[\d+\]\.clock$"), 3),
     ],
 }
 
@@ -71,6 +71,23 @@ def parse_series(cell) -> list[float]:
     if not isinstance(cell, str) or not cell:
         return []
     return [float(x) for x in _NUM_RE.findall(cell)]
+
+
+def parse_offset_series(vectime_cell, vecvalue_cell) -> tuple[list[float], list[float]]:
+    """(times, offset-from-GM) for a clock module's `timeChanged` vector.
+
+    INET 4.6+ replaced Gptp's own `timeDifference` signal (removed) with
+    ClockBase's `timeChanged`, which records each clock's own absolute time,
+    not an offset -- confirmed against INET's Gptp.ned (no timeDifference
+    signal exists there anymore) and ClockBase's docs. Every scenario's GM
+    has driftRate=0ppm, so the GM's clock time is always exactly simulation
+    time; offset-from-GM for any other node is therefore its clock time minus
+    the simulation time at which that sample was recorded.
+    """
+    times = parse_series(vectime_cell)
+    values = parse_series(vecvalue_cell)
+    n = min(len(times), len(values))
+    return times[:n], [values[i] - times[i] for i in range(n)]
 
 
 def hop_count_for(module: str) -> int | None:

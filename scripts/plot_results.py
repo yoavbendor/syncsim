@@ -33,6 +33,7 @@ from simdata import (  # noqa: E402
     export_vectors_to_csv,
     hop_count_for,
     load_vectors,
+    parse_offset_series,
     parse_series,
 )
 
@@ -40,12 +41,12 @@ BOTTLENECK = "Nominal.swCore.eth[1].macLayer.queue"
 
 
 def _offset_series(df: pd.DataFrame) -> dict[str, tuple[list[float], list[float]]]:
-    """module -> (times_s, |offset|_us) for every gptp.timeDifference node."""
-    rows = df[(df["name"] == "timeDifference:vector") & df["module"].str.endswith(".gptp")]
+    """module -> (times_s, |offset|_us) for every clock.timeChanged node."""
+    rows = df[(df["name"] == "timeChanged:vector") & df["module"].str.endswith(".clock")]
     out = {}
     for _, r in rows.iterrows():
-        t = parse_series(r.get("vectime"))
-        v = [abs(x) * 1e6 for x in parse_series(r.get("vecvalue"))]
+        t, offsets = parse_offset_series(r.get("vectime"), r.get("vecvalue"))
+        v = [abs(x) * 1e6 for x in offsets]
         if t and v:
             out[r["module"]] = (t, v)
     return out
@@ -100,7 +101,7 @@ def plot_backlog(df, out_png: Path, title: str) -> str | None:
 
 
 def plot_coupling(offsets, df, out_png: Path, title: str) -> str | None:
-    cc = next((m for m in offsets if m.endswith("coreClient.gptp")), None)
+    cc = next((m for m in offsets if m.endswith("coreClient.clock")), None)
     tq, vq = _queue_series(df, BOTTLENECK)
     if cc is None or not tq:
         return None

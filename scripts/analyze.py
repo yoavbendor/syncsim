@@ -2,8 +2,11 @@
 """
 Post-run analysis for the gPTP sync sandbox.
 
-Reports every syncing node's gPTP-measured offset from its master (INET's own
-`gptp.timeDifference` signal), grouped by hop count from the GM where the
+Reports every syncing node's gPTP-measured offset from its master (derived
+from each clock's own `timeChanged` vector -- see simdata.parse_offset_series
+for why: INET 4.6+ removed Gptp's `timeDifference` signal in favor of
+ClockBase's `timeChanged`, which records absolute clock time, not an offset),
+grouped by hop count from the GM where the
 topology is known (M2+), plus egress queue backlog and a congestion summary
 (Mbps/pps/drop-ppm) derived from queue scalars.
 
@@ -32,6 +35,7 @@ from simdata import (
     export_vectors_to_csv,
     hop_count_for,
     load_vectors,
+    parse_offset_series,
     parse_series,
 )
 
@@ -44,7 +48,7 @@ def print_offset_report(offset_rows: pd.DataFrame) -> dict[str, list[float]]:
     print("[analyze] gPTP offset-from-master per node:")
     for _, row in offset_rows.sort_values("module").iterrows():
         module = row["module"]
-        values = parse_series(row.get("vecvalue"))
+        _times, values = parse_offset_series(row.get("vectime"), row.get("vecvalue"))
         series_by_module[module] = values
         if not values:
             print(f"  {module:30s} no samples")
@@ -86,8 +90,7 @@ def print_time_windowed_report(offset_rows: pd.DataFrame, sim_time_s: float, num
     print(header)
     for _, row in offset_rows.sort_values("module").iterrows():
         module = row["module"]
-        times = parse_series(row.get("vectime"))
-        values = parse_series(row.get("vecvalue"))
+        times, values = parse_offset_series(row.get("vectime"), row.get("vecvalue"))
         if not times or not values:
             continue
         window_peaks = [0.0] * num_windows
@@ -203,9 +206,9 @@ def main() -> int:
     names = sorted(df["name"].unique()) if "name" in df else []
     print(f"[analyze] available vector names: {names}")
 
-    offset_rows = df[(df["name"] == "timeDifference:vector") & df["module"].str.endswith(".gptp")]
+    offset_rows = df[(df["name"] == "timeChanged:vector") & df["module"].str.endswith(".clock")]
     if offset_rows.empty:
-        print("[analyze] no gptp.timeDifference vectors found -- inspect the names above.", file=sys.stderr)
+        print("[analyze] no clock.timeChanged vectors found -- inspect the names above.", file=sys.stderr)
         return 1 if args.strict else 0
 
     series_by_module = print_offset_report(offset_rows)
