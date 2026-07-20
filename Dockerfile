@@ -216,8 +216,20 @@ FROM gui AS ide
 # CI-exercised for this target -- a headless system JRE is cheap insurance
 # against that assumption being wrong for this specific release, rather than
 # a whole broken tier discovered only when someone actually tries it.
+#
+# The IDE's UI is Eclipse/SWT, which on Linux means GTK3 + WebKitGTK (for the
+# embedded help/doc browser), not Qt -- Qtenv's Qt6 libs (already installed
+# in the `gui` stage this extends) don't cover this at all, and the IDE
+# crashed on first launch without them (confirmed from a real container
+# run: "An error has occurred. See the log file ... .log", no further
+# detail in stdout). Package list matches opp_env's own Nix expression for
+# omnetpp-6.4.0 (`opp_env info omnetpp-6.4.0`), which lists exactly these
+# as IDE runtime deps: gtk3, glib, glib-networking, libsecret, cairo,
+# webkitgtk.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         default-jre-headless \
+        libgtk-3-0t64 libwebkit2gtk-4.1-0 libsecret-1-0 \
+        libglib2.0-0t64 libcairo2 \
     && rm -rf /var/lib/apt/lists/*
 
 # The generic Linux release tarball extracted in gui-deps ships a prebuilt
