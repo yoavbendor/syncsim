@@ -133,14 +133,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         xvfb x11vnc novnc websockify fluxbox xterm x11-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# --ignore-installed: novnc pulls in apt's python3-numpy (a debian-packaged
-# dist-packages install with no RECORD file), which plain pip install then
-# fails to uninstall ("RECORD file not found") when it tries to upgrade it --
-# confirmed empirically on this image. --ignore-installed skips that
-# uninstall step and just shadows it with pip's own copy.
-RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed \
-        pandas numpy matplotlib scipy posix_ipc pyyaml
-
 SHELL ["/bin/bash", "-c"]
 
 ENV OMNETPP_ROOT=/opt/omnetpp
@@ -148,7 +140,22 @@ RUN wget -q https://github.com/omnetpp/omnetpp/releases/download/omnetpp-6.4.0/o
     && mkdir -p /opt && tar xzf /tmp/omnetpp.tgz -C /opt \
     && mv /opt/omnetpp-6.4.0 "$OMNETPP_ROOT" && rm /tmp/omnetpp.tgz
 ENV PATH=$OMNETPP_ROOT/bin:$PATH
+
+# requirements.txt pins pandas/numpy/matplotlib/scipy to versions configure's
+# own check demands (e.g. pandas<3.0.0) -- install it FIRST so those pins
+# win. --ignore-installed: novnc pulls in apt's python3-numpy (a debian-
+# packaged dist-packages install with no RECORD file), which plain pip
+# install then fails to uninstall ("RECORD file not found") when replacing
+# it -- confirmed empirically on this image.
 RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed -r "$OMNETPP_ROOT/python/requirements.txt"
+
+# Extras scripts/analyze.py needs that requirements.txt doesn't cover.
+# Installed after, unpinned: nothing above already constrains these, and
+# installing them first (unpinned, before requirements.txt's pins land) is
+# exactly what pulled in pandas 3.0.3 and broke configure's version check
+# -- confirmed empirically on this image.
+RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed \
+        posix_ipc pyyaml
 
 ENV INET_ROOT=/opt/inet4.7
 RUN mkdir -p /opt/inet_extract && wget -q https://github.com/inet-framework/inet/releases/download/v4.7.0/inet-4.7.0-src.tgz -O /tmp/inet.tgz \
