@@ -300,7 +300,7 @@ jobs:
     # downstream failure in build-and-smoke can no longer skip the deploy --
     # confirmed empirically in CI (deploy-pages was skipped this way even
     # though "Upload site/ as a plain artifact" had already succeeded).
-    if: always() && github.ref == 'refs/heads/claude/sync-simulation-tool-p6ade4'
+    if: always() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

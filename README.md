@@ -7,19 +7,17 @@ congests switch queues, PTP frames get delayed/dropped, sync degrades, bursts sp
 congestion relaxes, and the system recovers. That **sync ↔ congestion feedback loop is
 the phenomenon under study.**
 
-Built on **OMNeT++ 6.0.3 + INET 4.5.4**, run headless, entirely observable from CI.
+Built on **OMNeT++ 6.4.0 + INET 4.7.0**, run headless, entirely observable from CI.
 
-> **This branch (`claude/inet-4.7-omnetpp-6.4-migration`) is a migration spike,
-> now confirmed green.** M1-M5 all pass in real CI against OMNeT++ 6.4.0 + INET
-> 4.7.0 -- five well-understood ini/script fixes were needed (mandatory
+> **Migrated from OMNeT++ 6.0.3 + INET 4.5.4, confirmed green and merged into
+> `main`.** M1-M5 all pass in real CI against 6.4.0 + INET 4.7.0 -- five
+> well-understood ini/script fixes were needed (mandatory
 > `oscillator.nominalTickLength`, `simtime-resolution = fs`, streaming-mode PHY
 > submodules for Gptp's new timestamping, Ipv4's renamed `checksumMode`, and
 > deriving offset-from-GM from `clock.timeChanged` since `gptp.timeDifference`
-> was removed -- see `MIGRATION_HANDOFF.md`), but **zero NED changes**. Phase
-> B's YAML topology generator needed the same three ini-emission fixes and now
-> passes too. If a later check surfaces a real regression, this note and
-> `claude/sync-simulation-tool-p6ade4` (the proven 6.0.3/4.5.4 pin) remain the
-> fallback.
+> was removed -- see `MIGRATION_HANDOFF.md`/`MIGRATION_SPIKE_STATUS.md` for the
+> full history), but **zero NED changes**. Phase B's YAML topology generator
+> needed the same three ini-emission fixes and now passes too.
 
 ## Visual results (GitHub Pages)
 
@@ -139,15 +137,17 @@ lock-time will not match a production ptp4l build. Milestone 6 adds a `clknetsim
 deliberately out of scope — at gPTP's sampling rate it aliases to noise and teaches nothing
 about the system.
 
-**Why pinned to OMNeT++ 6.0.3 + INET 4.5.4 specifically:** not just "a known-good version" --
+**Why pinned to OMNeT++ 6.4.0 + INET 4.7.0 specifically:** not just "a known-good version" --
 INET 4.6 shipped a *second*, backward-incompatible gPTP reimplementation (formal state
 machines, a dedicated clock-servo submodule, different message-timestamping points) plus a
-rewritten clock model requiring femtosecond `simtime-resolution` for accurate 1ppm drift. All
-of M1-M5's verified numbers were produced under the pre-4.6 implementation this pin captures.
-Being on the older reimplementation isn't inherently *more* correct than the newer one -- both
-are still not ptp4l -- so this pin is being actively revisited: an isolated migration spike to
-OMNeT++ 6.4 + INET 4.7 (for its NED-editing/diagramming IDE tooling) is tracked separately and
-will replace this pin if it reaches a green M1-M5 rerun without disproportionate effort.
+rewritten clock model requiring femtosecond `simtime-resolution` for accurate 1ppm drift.
+This project was originally pinned to the pre-4.6 implementation (OMNeT++ 6.0.3 + INET
+4.5.4); the migration to 6.4.0 + INET 4.7.0 (for its NED-editing/diagramming IDE tooling)
+reached a green M1-M5 rerun with only ini/script fixes and zero NED changes, so it replaced
+that pin (`MIGRATION_HANDOFF.md`/`MIGRATION_SPIKE_STATUS.md` document the five breaking
+changes found and fixed along the way). Being on the newer reimplementation isn't inherently
+*more* correct than the older one -- neither is ptp4l -- so this is a currency decision, not
+a correctness one.
 
 ## Design principles
 
