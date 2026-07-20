@@ -5,7 +5,7 @@
 #                          CI builds (see .github/workflows/ci.yml's explicit
 #                          `target: headless`) and what every scripts/run.sh
 #                          invocation uses. Byte-for-byte the same recipe
-#                          this Dockerfile has always used.
+#                          this Dockerfile has always used, on Ubuntu 22.04.
 #   gui                -- adds Qtenv (WITH_QTENV=yes) plus a self-contained
 #                          Xvfb/x11vnc/noVNC virtual desktop, so a running
 #                          simulation is watchable from a browser tab with
@@ -24,14 +24,30 @@
 #   OMNeT++ 6.4.0, INET 4.7.0 -> ships the Gptp + TSN shaper + clock/oscillator
 #   modules this project uses, under INET's post-4.6 reimplementation of both
 #   (see README's "Why pinned to..." section for the migration history).
+#
+# `gui`/`ide` are on Ubuntu 24.04, not 22.04 like `headless` -- confirmed
+# empirically: 22.04's `qt6-base-dev` ships Qt 6.2.4, and OMNeT++ 6.4.0's
+# `configure` outright fails its Qt6 compile-check against it ("Cannot build
+# Qt apps") under 22.04's clang-14, even though 6.2.4 nominally satisfies the
+# ">=6.2" version requirement -- some combination of that specific Qt build
+# and toolchain doesn't work, and config.log's underlying compiler error
+# wasn't worth chasing once 24.04's Qt 6.4.2 was confirmed to just work
+# (verified end-to-end: configure succeeds, `make base` links a Qtenv-capable
+# opp_run, `ldd` shows it against Qt6). The OMNeT++ project's own `opp_env`
+# package manager (Nix-based) was also tried and does solve this properly --
+# its Nix expression pins a matched-known-good Qt6 -- but its flake-based
+# dependency resolution shells out to the GitHub API at install time
+# (`api.github.com/repos/numtide/flake-utils/...`), which is a real
+# rate-limiting risk for repeated `docker build` in CI, not just a one-off
+# sandbox fluke, so the smaller, already-proven Ubuntu-version bump was
+# chosen over adopting Nix here.
 # The build is heavy (~20-30 min first time for `headless`; `gui`/`ide` add
-# more on top). CI caches `headless` via buildx gha cache.
+# more on top, plus their own ~2 min apt install). CI caches `headless` via
+# buildx gha cache.
 
 # =============================================================================
-# Stage: base-deps -- apt/pip layer + OMNeT++/INET source, shared by all three
-# final targets. Left unconfigured/unbuilt here because `headless` and `gui`
-# diverge on `./configure`'s WITH_QTENV flag, so each final stage runs its own
-# configure+make base -- this stage only avoids re-downloading the sources.
+# Stage: base-deps -- apt/pip layer + OMNeT++/INET source for `headless`.
+# Ubuntu 22.04 -- unchanged from the original single-target Dockerfile.
 # =============================================================================
 FROM ubuntu:22.04 AS base-deps
 
@@ -97,15 +113,49 @@ ENV NEDPATH=$INET_ROOT/src
 WORKDIR /work
 
 # =============================================================================
-# Stage: gui -- Qtenv (WITH_QTENV=yes) + a throwaway Xvfb/x11vnc/noVNC desktop.
-# Local/interactive use only; never built by CI.
+# Stage: gui-deps -- apt/pip layer + OMNeT++/INET source for `gui`/`ide`.
+# Ubuntu 24.04, not 22.04 -- see the top-of-file note on the Qt6 version
+# incompatibility this sidesteps. Duplicates base-deps' download/apt steps
+# rather than extending it, since the two stages are now on different base
+# images; the extra download cost is small next to the compile time either
+# way, and correctness (an image that actually builds Qtenv) matters more
+# than reusing a shared layer here.
 # =============================================================================
-FROM base-deps AS gui
+FROM ubuntu:24.04 AS gui-deps
 
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential clang lld gdb bison flex perl ccache \
+        python3 python3-pip python3-dev python3-venv \
+        libxml2-dev zlib1g-dev ca-certificates wget xz-utils pkg-config \
+        doxygen graphviz xdg-utils libdw-dev \
         qt6-base-dev qt6-base-dev-tools libgl1-mesa-dev libglu1-mesa-dev \
         xvfb x11vnc novnc websockify fluxbox xterm x11-utils \
     && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --no-cache-dir --break-system-packages \
+        pandas numpy matplotlib scipy posix_ipc pyyaml
+
+SHELL ["/bin/bash", "-c"]
+
+ENV OMNETPP_ROOT=/opt/omnetpp
+RUN wget -q https://github.com/omnetpp/omnetpp/releases/download/omnetpp-6.4.0/omnetpp-6.4.0-linux-x86_64.tgz -O /tmp/omnetpp.tgz \
+    && mkdir -p /opt && tar xzf /tmp/omnetpp.tgz -C /opt \
+    && mv /opt/omnetpp-6.4.0 "$OMNETPP_ROOT" && rm /tmp/omnetpp.tgz
+ENV PATH=$OMNETPP_ROOT/bin:$PATH
+RUN pip3 install --no-cache-dir --break-system-packages -r "$OMNETPP_ROOT/python/requirements.txt"
+
+ENV INET_ROOT=/opt/inet4.7
+RUN mkdir -p /opt/inet_extract && wget -q https://github.com/inet-framework/inet/releases/download/v4.7.0/inet-4.7.0-src.tgz -O /tmp/inet.tgz \
+    && tar xzf /tmp/inet.tgz -C /opt/inet_extract \
+    && mv /opt/inet_extract/*/ "$INET_ROOT" \
+    && rm -rf /opt/inet_extract /tmp/inet.tgz
+
+# =============================================================================
+# Stage: gui -- Qtenv (WITH_QTENV=yes) + a throwaway Xvfb/x11vnc/noVNC desktop.
+# Local/interactive use only; never built by CI.
+# =============================================================================
+FROM gui-deps AS gui
 
 # Same `make base` recipe as the headless stage, not the full `make`: with
 # WITH_QTENV=yes, `base`'s target list picks up `qtenv` automatically (see
@@ -158,7 +208,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         default-jre-headless \
     && rm -rf /var/lib/apt/lists/*
 
-# The generic Linux release tarball extracted in base-deps ships a prebuilt
+# The generic Linux release tarball extracted in gui-deps ships a prebuilt
 # IDE (Eclipse RCP with its own bundled JRE) at $OMNETPP_ROOT/ide -- building
 # it from source instead means `make ide`, which shells out to
 # releng/build-omnetpp-ide-linux (a Maven/Tycho build against Eclipse's p2
