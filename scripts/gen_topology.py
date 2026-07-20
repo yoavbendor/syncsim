@@ -163,10 +163,20 @@ def render_ini(model: dict, edges: list[dict]) -> str:
         "[General]",
         f"network = {net}",
         f"sim-time-limit = {model['sim_time_limit']}",
+        # INET 4.6+ requires fs-precision simtime-resolution, an explicit
+        # oscillator nominalTickLength (no default), and streaming-mode PHY
+        # submodules for Gptp's receptionStarted/transmissionStarted-based
+        # timestamping -- same fixes as the hand-written ini files (see
+        # simulations/minimal.ini's note); the generator has to emit them too
+        # or its output silently regresses to pre-4.6 assumptions.
+        "simtime-resolution = fs",
+        "**.transmitter.typename = \"StreamingTransmitter\"",
+        "**.receiver.typename = \"DestreamingReceiver\"",
         "",
         "*.*.hasTimeSynchronization = true",
         "",
         "**.clock.oscillator.typename = \"ConstantDriftOscillator\"",
+        "**.clock.oscillator.nominalTickLength = 10ns",
     ]
     for node in model["nodes"]:
         sel = f"*.{node['name']}[*]" if _is_vector(node) else f"*.{node['name']}"

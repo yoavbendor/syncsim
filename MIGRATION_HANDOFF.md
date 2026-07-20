@@ -87,31 +87,39 @@ config), and the SyncOnly gPTP-filtered capture. All three ran to completion
 with real, sane numbers (not just "no crash" — e.g. capture file sizes,
 packet counts).
 
-## What's NOT yet confirmed (this is your primary job)
+## UPDATE: M1-M5 are now all confirmed green in real CI 🎉
 
-- **M2 (`nominal.ini`, 17-node multi-hop)** — the 5 fixes above are already
-  applied to this file too, but no CI run has yet gotten far enough to prove
-  it passes (see cascade note below). This is the highest-risk step per the
-  original plan: multi-hop bridging is where INET 4.7's most structurally
-  different gPTP machinery would surface first.
-- **M3 (`congestion.ini`)**, **M4 (`feedback.ini`)**, **M5 (`sweep.ini`)** —
-  same story: fixes already applied, unconfirmed whether they're sufficient.
-- **Phase B's YAML→NED/ini generator (`scripts/gen_topology.py`)** — not
-  checked against INET 4.7 at all. A prior sandbox session flagged that
-  `TsnClock` may now `extend GptpMaster` directly rather than toggling a
-  generic `gptp` submodule via `hasTimeSynchronization` — worth verifying
-  before assuming the generator's output still matches hand-written NED.
-  If the generated networks diverge, the CI step "Verify generated networks
-  are bit-for-bit equivalent to hand-written" will fail loudly and tell you
-  exactly what changed.
-- **Why M2-M5 haven't been proven yet even though the fixes are pushed:**
-  every earlier CI run failed on an *upstream* step (M1's analyze step, or a
-  pcap step), and `ci.yml`'s M2-M5 steps don't have `if: always()` — a
-  failure anywhere before them causes GitHub Actions to skip (not fail) all
-  of M2 through the site-build step. Once M1's `Export + analyze telemetry`
-  step passes clean (which the fix-5 above should finally achieve), M2-M5
-  should actually execute for the first time. **Check the in-flight run
-  (commit `68de868`) first** — it may have already answered this.
+As of commit `68de868` (run `29724722310`), every core milestone passed,
+including `analyze.py --strict`'s sanity gate:
+
+- **M1** (`minimal.ini`) — pass
+- **M2** (`nominal.ini`, 17-node multi-hop) — pass. This was the highest-risk
+  step per the original plan (multi-hop bridging = INET 4.7's most
+  structurally different gPTP machinery), and it passed with **zero NED
+  changes** — the same 3 ini fixes below were sufficient.
+- **M3** (`congestion.ini`) — pass
+- **M4** (`feedback.ini`) — pass
+- **M5** (`sweep.ini`, parameter sweep across queue capacities) — pass
+- pcap capture/replay round-trip + SyncOnly gPTP-filtered capture — pass
+
+**One remaining gap, found and fixed in the same run:** Phase B's YAML→NED/ini
+generator (`scripts/gen_topology.py`) emits its own `.gen.ini`, which didn't
+carry the 3 fixes below — it hit the exact same `nominalTickLength` error M1
+hit originally. Fixed by adding the same three lines
+(`simtime-resolution = fs`, `**.clock.oscillator.nominalTickLength = 10ns`,
+`**.transmitter.typename = "StreamingTransmitter"` /
+`**.receiver.typename = "DestreamingReceiver"`) to `render_ini()`'s emitted
+`[General]` block. **Not yet confirmed in CI** — that's the next run to
+check. The "verify generated networks are bit-for-bit equivalent to
+hand-written" step compares actual simulation *output* (`.sca`/`.vec` via
+`scripts/verify_topology_equivalence.py`), not a static file diff, so once
+the generated ini can run at all, that check should either pass or surface a
+real semantic divergence worth its own investigation.
+
+**This is the point the original plan's decision gate was written for**: a
+green M1-M5 rerun without disproportionate effort. It's here. Once the Phase
+B fix above is confirmed in CI, the remaining work is the decision itself —
+see the gate quoted below — not more debugging.
 
 ## How to work: sandbox-first, CI as the authority
 
@@ -184,6 +192,10 @@ the point to seriously weigh cost vs. the gate above, not before.
   `deploy-pages` jobs (a job-level `environment:` gates the *entire* job's
   start on non-Pages branches — unrelated to INET, a general CI fix cherry-
   picked from the main branch).
+- `scripts/gen_topology.py` — `render_ini()` now emits the same three fixes
+  (`simtime-resolution`, `nominalTickLength`, streaming PHY submodules) as
+  the hand-written ini files, so Phase B's generated networks don't hit the
+  same INET 4.6+ breaks the hand-written ones did.
 
 ## One environment gotcha worth relaying (from a prior sandbox session)
 
