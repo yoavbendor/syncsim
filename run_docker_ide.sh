@@ -19,6 +19,12 @@
 #   /opt/inet4.7   (INET, baked into the image)
 # The workspace is persisted on the host (see SYNCSIM_IDE_WORKSPACE below),
 # so this is a one-time step, not a per-run one.
+#
+# The image is (re)built on every run so you never run a stale entrypoint
+# script/Dockerfile change by accident -- when nothing changed, Docker's
+# layer cache makes this a no-op (a few seconds at most). Set
+# SYNCSIM_SKIP_BUILD=1 to skip it (e.g. for fast repeat launches while
+# iterating on something unrelated to the image itself).
 set -e
 
 cd "$(dirname "$0")"
@@ -30,6 +36,12 @@ WORKSPACE_DIR="${SYNCSIM_IDE_WORKSPACE:-$HOME/.syncsim-ide-workspace}"
 if [ ! -f "$SIM_FILE" ]; then
     echo "error: $SIM_FILE not found (relative to repo root)" >&2
     exit 1
+fi
+
+if [ "$SYNCSIM_SKIP_BUILD" != "1" ]; then
+    echo ">> Building $IMAGE (cached layers make this quick if nothing changed;" \
+         "SYNCSIM_SKIP_BUILD=1 to skip)"
+    docker build --target ide -t "$IMAGE" .
 fi
 
 if [ -z "$DISPLAY" ]; then
