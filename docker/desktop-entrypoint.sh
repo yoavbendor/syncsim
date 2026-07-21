@@ -54,12 +54,16 @@ if [ "$X11_FORWARD" = "1" ]; then
     fi
     echo ">> X11 forwarding: drawing to host display $DISPLAY"
 
-    if [ -n "$AUTOSTART_APP" ]; then
-        "$OMNETPP_ROOT/bin/$AUTOSTART_APP" &
-    fi
-
+    # Only autostart AUTOSTART_APP when nothing else was asked for -- an
+    # explicit command (e.g. our own `omnetpp -data ... foo.ini`) already
+    # launches the IDE itself, and running both at once fights over the
+    # same Eclipse workspace lock and crashes both.
     if [ "$#" -gt 0 ] && [ "$1" != "bash" ]; then
         exec "$@"
+    fi
+
+    if [ -n "$AUTOSTART_APP" ]; then
+        "$OMNETPP_ROOT/bin/$AUTOSTART_APP" &
     fi
     exec bash
 fi
@@ -86,16 +90,19 @@ echo ">> Laggy? Re-run with X11_FORWARD=1 instead (see this script's header)."
 
 xterm -geometry 100x30+20+20 &
 
+# A real command (e.g. `opp_run -u Qtenv ...`) replaces the idle wait below
+# and runs in the foreground, inside the desktop that's already up. Only
+# autostart AUTOSTART_APP when nothing else was asked for -- an explicit
+# command that itself launches the IDE would otherwise collide with it
+# over the same Eclipse workspace lock.
+if [ "$#" -gt 0 ] && [ "$1" != "bash" ]; then
+    exec "$@"
+fi
+
 # AUTOSTART_APP is unset in the `gui` image (just a terminal) and set to
 # "omnetpp" in the `ide` image (launches the IDE alongside the terminal).
 if [ -n "$AUTOSTART_APP" ]; then
     "$OMNETPP_ROOT/bin/$AUTOSTART_APP" &
-fi
-
-# A real command (e.g. `opp_run -u Qtenv ...`) replaces the idle wait below
-# and runs in the foreground, inside the desktop that's already up.
-if [ "$#" -gt 0 ] && [ "$1" != "bash" ]; then
-    exec "$@"
 fi
 
 # Default CMD is "bash": keep the container alive for as long as the virtual
