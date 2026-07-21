@@ -96,16 +96,27 @@ RUN mkdir -p /opt/inet_extract && wget -q https://github.com/inet-framework/inet
 # =============================================================================
 FROM base-deps AS headless
 
-RUN cd "$OMNETPP_ROOT" \
+# `bash -c '...'` explicitly, not a bare RUN relying on the Dockerfile's
+# SHELL directive: SHELL doesn't reliably carry across a `FROM <stage>`
+# transition in every builder (confirmed empirically -- BuildKit tolerates
+# it, but podman/buildah resets to /bin/sh, and OMNeT++'s own `setenv`
+# script uses bash-only syntax like `[[ ]]` and `${BASH_SOURCE[0]}` that
+# breaks under dash regardless of `source` vs `.`). Forcing bash per-RUN
+# sidesteps that inconsistency entirely instead of depending on it.
+RUN bash -c ' \
+    cd "$OMNETPP_ROOT" \
     && source setenv \
     && ./configure WITH_QTENV=no WITH_OSG=no WITH_OSGEARTH=no \
-    && make -j"$(nproc)" MODE=release base
+    && make -j"$(nproc)" MODE=release base \
+    '
 
-RUN cd "$INET_ROOT" \
+RUN bash -c ' \
+    cd "$INET_ROOT" \
     && source "$OMNETPP_ROOT/setenv" \
     && source setenv \
     && make makefiles \
-    && make -j"$(nproc)" MODE=release
+    && make -j"$(nproc)" MODE=release \
+    '
 
 # Runtime env so `opp_run` finds the kernel + INET lib + NED files.
 ENV LD_LIBRARY_PATH=$INET_ROOT/src:$OMNETPP_ROOT/lib
@@ -178,16 +189,20 @@ FROM gui-deps AS gui
 # image has no use for and gains nothing from, while `make base` here costs
 # the same incremental time as the headless build's `make base` plus Qtenv
 # itself (~1 more compile unit, `layout`).
-RUN cd "$OMNETPP_ROOT" \
+RUN bash -c ' \
+    cd "$OMNETPP_ROOT" \
     && source setenv \
     && ./configure WITH_QTENV=yes WITH_OSG=no WITH_OSGEARTH=no \
-    && make -j"$(nproc)" MODE=release base
+    && make -j"$(nproc)" MODE=release base \
+    '
 
-RUN cd "$INET_ROOT" \
+RUN bash -c ' \
+    cd "$INET_ROOT" \
     && source "$OMNETPP_ROOT/setenv" \
     && source setenv \
     && make makefiles \
-    && make -j"$(nproc)" MODE=release
+    && make -j"$(nproc)" MODE=release \
+    '
 
 ENV LD_LIBRARY_PATH=$INET_ROOT/src:$OMNETPP_ROOT/lib
 ENV NEDPATH=$INET_ROOT/src
