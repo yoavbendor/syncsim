@@ -64,6 +64,11 @@ mkdir -p "$WORKSPACE_DIR"
 echo ">> Opening OMNeT++ IDE on $SIM_FILE (host display $DISPLAY)"
 echo ">> IDE workspace persisted at: $WORKSPACE_DIR"
 
+# `omnetpp` backgrounds the real Eclipse launcher and returns immediately
+# by design (it's meant for an interactive shell, not a container's PID 1)
+# -- `wait` blocks this shell until that background job (the IDE) actually
+# exits, instead of tearing the container down the instant `omnetpp`
+# itself returns.
 exec docker run --rm -it \
     --network host \
     -e X11_FORWARD=1 \
@@ -73,4 +78,4 @@ exec docker run --rm -it \
     -v "$WORKSPACE_DIR:/root/.eclipse-workspace" \
     -v "$PWD:/work" \
     "$IMAGE" \
-    omnetpp -data /root/.eclipse-workspace "/work/$SIM_FILE"
+    bash -c 'omnetpp -data /root/.eclipse-workspace "$1"; wait' _ "/work/$SIM_FILE"
