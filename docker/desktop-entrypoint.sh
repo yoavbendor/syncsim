@@ -1,15 +1,57 @@
 #!/bin/bash
-# Entrypoint for the `gui`/`ide` Docker targets: starts a throwaway virtual
-# desktop (Xvfb + fluxbox + x11vnc + noVNC) inside the container so Qtenv
-# (and, in the `ide` image, the OMNeT++ IDE) are watchable/usable from any
-# browser at http://localhost:6080/vnc.html -- no host-side X11 forwarding or
-# VNC client needed. The `headless` image never includes this script.
+# Entrypoint for the `gui`/`ide` Docker targets. Two modes:
+#
+# noVNC (default) -- starts a throwaway virtual desktop (Xvfb + fluxbox +
+#   x11vnc + noVNC) inside the container so Qtenv (and, in the `ide` image,
+#   the OMNeT++ IDE) are watchable/usable from any browser at
+#   http://localhost:6080/vnc.html -- no host-side setup needed, but every
+#   frame is VNC-encoded and round-tripped over the network, which is
+#   noticeably laggier for an interactive IDE than a local window.
+#
+# X11 forwarding (X11_FORWARD=1) -- skips Xvfb/fluxbox/x11vnc/websockify
+#   entirely and draws straight to the host's own X server via a forwarded
+#   DISPLAY + X11 socket, giving native window responsiveness. Requires a
+#   host X server reachable from the container:
+#
+#     # Linux host:
+#     xhost +local:docker
+#     docker run --rm -e X11_FORWARD=1 -e DISPLAY=$DISPLAY \
+#         -v /tmp/.X11-unix:/tmp/.X11-unix:ro -v "$PWD:/work" syncsim:ide
+#
+#     # macOS host: install XQuartz, enable "Allow connections from network
+#     # clients" in its preferences, then `xhost +localhost` and
+#     # DISPLAY=host.docker.internal:0 in place of the two lines above.
+#
+#     # Windows host (WSL2 with WSLg): DISPLAY is already set by WSLg: pass
+#     # -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix:ro, no xhost step.
+#
+# The `headless` image never includes this script.
 set -e
 
-DISPLAY_NUM="${DISPLAY#:}"
+if [ "$X11_FORWARD" = "1" ]; then
+    if [ -z "$DISPLAY" ] || [ ! -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; then
+        echo ">> X11_FORWARD=1 but no usable \$DISPLAY / /tmp/.X11-unix socket found." >&2
+        echo ">> Pass -e DISPLAY=\$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix:ro (see" >&2
+        echo ">> this script's header comment for the host-specific setup)." >&2
+        exit 1
+    fi
+    echo ">> X11 forwarding: drawing to host display $DISPLAY"
+
+    if [ -n "$AUTOSTART_APP" ]; then
+        "$OMNETPP_ROOT/bin/$AUTOSTART_APP" &
+    fi
+
+    if [ "$#" -gt 0 ] && [ "$1" != "bash" ]; then
+        exec "$@"
+    fi
+    exec bash
+fi
+
+DISPLAY=":99"
+export DISPLAY
 GEOMETRY="${VNC_GEOMETRY:-1600x900x24}"
 
-Xvfb ":$DISPLAY_NUM" -screen 0 "$GEOMETRY" -nolisten tcp &
+Xvfb "$DISPLAY" -screen 0 "$GEOMETRY" -nolisten tcp &
 XVFB_PID=$!
 
 for _ in $(seq 1 50); do
@@ -23,6 +65,7 @@ websockify --web=/usr/share/novnc 6080 localhost:5900 >/tmp/websockify.log 2>&1 
 
 echo ">> noVNC ready: open http://localhost:6080/vnc.html in a browser."
 echo ">> (or point a VNC client at localhost:5900 if that port is published too)"
+echo ">> Laggy? Re-run with X11_FORWARD=1 instead (see this script's header)."
 
 xterm -geometry 100x30+20+20 &
 

@@ -224,6 +224,25 @@ docker build --target ide -t syncsim:ide .
 docker run --rm -p 6080:6080 -v "$PWD:/work" syncsim:ide
 ```
 
+noVNC is zero-setup but every frame is VNC-encoded and round-tripped over the
+network, which is noticeably laggier for an interactive IDE than a local window.
+`X11_FORWARD=1` skips Xvfb/noVNC entirely and draws straight to the host's own X
+server instead, for native responsiveness:
+
+```bash
+# Linux host:
+xhost +local:docker
+docker run --rm -e X11_FORWARD=1 -e DISPLAY=$DISPLAY \
+    -v /tmp/.X11-unix:/tmp/.X11-unix:ro -v "$PWD:/work" syncsim:ide
+
+# macOS: install XQuartz, enable "Allow connections from network clients" in its
+# preferences, `xhost +localhost`, and use -e DISPLAY=host.docker.internal:0
+# in place of the two lines above.
+
+# Windows (WSL2 with WSLg): DISPLAY is already set by WSLg -- just pass
+# -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix:ro, no xhost step.
+```
+
 ## Milestones
 
 - **M0** — toolchain + CI + scaffolding *(this commit)*
