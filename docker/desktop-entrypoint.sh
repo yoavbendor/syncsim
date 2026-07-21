@@ -10,13 +10,20 @@
 #
 # X11 forwarding (X11_FORWARD=1) -- skips Xvfb/fluxbox/x11vnc/websockify
 #   entirely and draws straight to the host's own X server via a forwarded
-#   DISPLAY + X11 socket, giving native window responsiveness. Requires a
-#   host X server reachable from the container:
+#   DISPLAY, giving native window responsiveness. Requires a host X server
+#   reachable from the container:
 #
-#     # Linux host:
+#     # Linux host (local X server, unix socket):
 #     xhost +local:docker
 #     docker run --rm -e X11_FORWARD=1 -e DISPLAY=$DISPLAY \
 #         -v /tmp/.X11-unix:/tmp/.X11-unix:ro -v "$PWD:/work" syncsim:ide
+#
+#     # Linux host over SSH X11 forwarding (ssh -X): sshd's X11 proxy is
+#     # TCP-only on the host's loopback (DISPLAY like "localhost:110.0",
+#     # no matching /tmp/.X11-unix socket), so the container needs to share
+#     # the host's network namespace instead of a socket bind-mount:
+#     docker run --rm --network host -e X11_FORWARD=1 -e DISPLAY=$DISPLAY \
+#         -v "$PWD:/work" syncsim:ide
 #
 #     # macOS host: install XQuartz, enable "Allow connections from network
 #     # clients" in its preferences, then `xhost +localhost` and
@@ -29,15 +36,15 @@
 set -e
 
 if [ "$X11_FORWARD" = "1" ]; then
-    # DISPLAY is "[host]:display[.screen]" (e.g. "localhost:110.0" under SSH
-    # X11 forwarding) but the socket file is just "X<display>", no screen
-    # suffix -- strip both the host prefix and the ".screen" part.
-    DISPLAY_NUM="${DISPLAY#*:}"
-    DISPLAY_NUM="${DISPLAY_NUM%%.*}"
-    if [ -z "$DISPLAY" ] || [ ! -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ]; then
-        echo ">> X11_FORWARD=1 but no usable \$DISPLAY / /tmp/.X11-unix socket found." >&2
-        echo ">> Pass -e DISPLAY=\$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix:ro (see" >&2
-        echo ">> this script's header comment for the host-specific setup)." >&2
+    # Ask libX11 (via xdpyinfo) whether DISPLAY is actually reachable,
+    # rather than looking for a /tmp/.X11-unix socket file -- SSH X11
+    # forwarding (DISPLAY like "localhost:110.0") is TCP-only and never
+    # creates one, so a socket-existence check false-negatives on it.
+    if [ -z "$DISPLAY" ] || ! xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
+        echo ">> X11_FORWARD=1 but \$DISPLAY ($DISPLAY) is not reachable." >&2
+        echo ">> Local X server: pass -e DISPLAY=\$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix:ro" >&2
+        echo ">> SSH-forwarded X (DISPLAY=localhost:N.S): pass --network host instead of" >&2
+        echo ">> the socket mount (see this script's header comment)." >&2
         exit 1
     fi
     echo ">> X11 forwarding: drawing to host display $DISPLAY"

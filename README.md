@@ -230,10 +230,16 @@ network, which is noticeably laggier for an interactive IDE than a local window.
 server instead, for native responsiveness:
 
 ```bash
-# Linux host:
+# Linux host (local X server):
 xhost +local:docker
 docker run --rm -e X11_FORWARD=1 -e DISPLAY=$DISPLAY \
     -v /tmp/.X11-unix:/tmp/.X11-unix:ro -v "$PWD:/work" syncsim:ide
+
+# Linux host over SSH (ssh -X): sshd's X11 proxy is TCP-only on the host's
+# loopback (DISPLAY like "localhost:110.0", no /tmp/.X11-unix socket to
+# mount), so share the host's network namespace instead:
+docker run --rm --network host -e X11_FORWARD=1 -e DISPLAY=$DISPLAY \
+    -v "$PWD:/work" syncsim:ide
 
 # macOS: install XQuartz, enable "Allow connections from network clients" in its
 # preferences, `xhost +localhost`, and use -e DISPLAY=host.docker.internal:0
