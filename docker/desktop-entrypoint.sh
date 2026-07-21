@@ -21,8 +21,13 @@
 #     # Linux host over SSH X11 forwarding (ssh -X): sshd's X11 proxy is
 #     # TCP-only on the host's loopback (DISPLAY like "localhost:110.0",
 #     # no matching /tmp/.X11-unix socket), so the container needs to share
-#     # the host's network namespace instead of a socket bind-mount:
+#     # the host's network namespace instead of a socket bind-mount. Rootless
+#     # podman/docker also can't read your real ~/.Xauthority (owned by your
+#     # host UID, mode 600) from inside the container's remapped UID, so
+#     # extract just this display's cookie to a throwaway world-readable file:
+#     xauth extract /tmp/x11.xauth $DISPLAY && chmod 644 /tmp/x11.xauth
 #     docker run --rm --network host -e X11_FORWARD=1 -e DISPLAY=$DISPLAY \
+#         -e XAUTHORITY=/root/.Xauthority -v /tmp/x11.xauth:/root/.Xauthority:ro \
 #         -v "$PWD:/work" syncsim:ide
 #
 #     # macOS host: install XQuartz, enable "Allow connections from network
