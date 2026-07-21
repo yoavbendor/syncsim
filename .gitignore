@@ -19,3 +19,11 @@ simulations/*.gen.ini
 Makefile
 __pycache__/
 *.pyc
+
+# Eclipse/OMNeT++ IDE workspace metadata -- should live outside the repo
+# (see run_docker_ide.sh's SYNCSIM_IDE_WORKSPACE), but ignore it here too
+# in case it ever ends up inside by accident.
+.metadata/
+.project
+.cproject
+.oppbuildspec

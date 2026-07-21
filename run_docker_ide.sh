@@ -64,18 +64,25 @@ mkdir -p "$WORKSPACE_DIR"
 echo ">> Opening OMNeT++ IDE on $SIM_FILE (host display $DISPLAY)"
 echo ">> IDE workspace persisted at: $WORKSPACE_DIR"
 
-# `omnetpp` backgrounds the real Eclipse launcher and returns immediately
-# by design (it's meant for an interactive shell, not a container's PID 1)
-# -- `wait` blocks this shell until that background job (the IDE) actually
-# exits, instead of tearing the container down the instant `omnetpp`
-# itself returns.
+# Call the real Eclipse launcher (opt/omnetpp/ide/opp_ide) directly rather
+# than going through the `omnetpp` wrapper script: that wrapper always
+# prepends `--launcher.openFile` in front of whatever args it's given, so
+# a `-data <dir>` we pass through it gets swallowed as if IT were the
+# filename to open, and Eclipse silently falls back to picking the opened
+# file's own directory as the workspace -- which for us would be
+# /work/simulations, writing Eclipse's .metadata straight into the
+# git-tracked repo. Calling the native launcher ourselves keeps `-data`
+# working and the workspace out of the repo. It also runs in the
+# foreground natively (the wrapper's trailing `&` was its own addition),
+# so no extra `wait` trick is needed either.
 exec docker run --rm -it \
     --network host \
     -e X11_FORWARD=1 \
     -e DISPLAY="$DISPLAY" \
     -e XAUTHORITY=/root/.Xauthority \
+    -e LANG=en_US.UTF-8 \
     -v "$XAUTH_FILE:/root/.Xauthority:ro" \
     -v "$WORKSPACE_DIR:/root/.eclipse-workspace" \
     -v "$PWD:/work" \
     "$IMAGE" \
-    bash -c 'omnetpp -data /root/.eclipse-workspace "$1"; wait' _ "/work/$SIM_FILE"
+    bash -c 'source "$OMNETPP_ROOT/setenv" && exec "$OMNETPP_ROOT/ide/opp_ide" -data /root/.eclipse-workspace --launcher.openFile "$1"' _ "/work/$SIM_FILE"
