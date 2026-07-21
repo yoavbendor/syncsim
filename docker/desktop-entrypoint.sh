@@ -29,7 +29,12 @@
 set -e
 
 if [ "$X11_FORWARD" = "1" ]; then
-    if [ -z "$DISPLAY" ] || [ ! -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; then
+    # DISPLAY is "[host]:display[.screen]" (e.g. "localhost:110.0" under SSH
+    # X11 forwarding) but the socket file is just "X<display>", no screen
+    # suffix -- strip both the host prefix and the ".screen" part.
+    DISPLAY_NUM="${DISPLAY#*:}"
+    DISPLAY_NUM="${DISPLAY_NUM%%.*}"
+    if [ -z "$DISPLAY" ] || [ ! -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ]; then
         echo ">> X11_FORWARD=1 but no usable \$DISPLAY / /tmp/.X11-unix socket found." >&2
         echo ">> Pass -e DISPLAY=\$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix:ro (see" >&2
         echo ">> this script's header comment for the host-specific setup)." >&2
