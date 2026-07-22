@@ -21,6 +21,12 @@ ns3/
   nominal/           Phase 3 (M2 / R-BRIDGE): multi-hop time-aware bridges with
                      residence-time correction (18 nodes, 3 hop depths). See
                      nominal/README.md.
+  congestion/        Phase 3 (M3): finite real-dropping queues + background
+                     congestion; sync degrades only for the node sharing the
+                     congested egress queue. See congestion/README.md.
+  feedback/          Phase 3 (M4): finite queues + per-local-clock-aligned
+                     bursts from all 12 zone clients; honest coupling-or-not
+                     finding. See feedback/README.md.
 ```
 
 Each `.cc` file here is dropped into a pinned ns-3 checkout's `scratch/`
@@ -138,4 +144,35 @@ the project's existing quality bar for OMNeT++/INET.
   unchanged; does not yet cover data-plane congestion coupling (M3/M4).
   **Not yet confirmed in real CI** — same Docker-daemon caveat. Full numeric
   evidence in `nominal/README.md`.
+- **M3 (Phase 3, finite queues + background congestion): PASSED in the
+  sandbox.** `congestion/congestion-topology.cc` reuses the exact 18-node
+  Nominal topology and the **byte-identical** vendored Phase-2 gPTP + Phase-1
+  clock, adds a finite real-dropping `DropTailQueue` (`packetCapacity = 10`) on
+  every switch egress port, and offers three ~50 Mbps background data flows
+  (distinct ethertype) onto the single `swCore↔coreClient` 100 Mbps link — a
+  ~150-into-100 Mbps oversubscription. gPTP and data share the **same
+  per-device CSMA egress queue**, so the finding falls straight out: at the
+  bottleneck the queue runs full (mean backlog 8.82/10, max 10/10) and drops
+  **32.64%** (reproducing INET's ~34% / 9.23 backlog regime), and the gPTP Sync
+  frames toward `coreClient` are dropped/delayed from that same queue. The
+  scenario runs **twice in one process** (baseline no-traffic vs congested) and
+  prints per-node peak offset side by side: **`coreClient` alone degrades — by
+  ~2468x (18.75 → 46,281 µs) — while all 16 other nodes hold their baseline
+  peak byte-identically (ratio exactly 1.0x)**. `coreClient`'s servo corrections
+  drop 239 → 170 (real Syncs starved from the queue). That is the M3 finding:
+  **congestion degrades sync only for whoever shares the congested egress
+  queue, not globally.** The congested peak (~46 ms) is far larger than INET's
+  ~1.95 ms — an honest, documented consequence of the Phase-2 servo (deadbeat +
+  integral, gptp.h's stated servo simplification) losing lock and ringing under
+  *sporadic* Sync loss (a servo transient, not free-run drift: 46 ms at 150 ppm
+  would need ~300 s); the gate is the *shape/isolation*, not the digits, and the
+  isolation is perfect. One new simplification (**S5**): the background flows are
+  injected at their convergence egress rather than L2-forwarded hop-by-hop,
+  because ns-3's shared-medium `CsmaChannel` (no full-duplex mode; full-duplex
+  P2P rejects the vendored gPTP ethertype) would otherwise couple gPTP to
+  reverse-direction transit data on every link — an artifact absent from INET's
+  full-duplex Ethernet, and the reason INET gets clean isolation. Carries S1–S4
+  forward unchanged. Deterministic (byte-identical stdout across two runs).
+  **Not yet confirmed in real CI** — same Docker-daemon caveat. Full numeric
+  evidence in `congestion/README.md`.
 </content>

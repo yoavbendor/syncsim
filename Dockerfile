@@ -307,6 +307,8 @@ COPY ns3/smoke "$NS3_ROOT/scratch/syncsim-smoke"
 COPY ns3/clock "$NS3_ROOT/scratch/syncsim-clock"
 COPY ns3/gptp "$NS3_ROOT/scratch/syncsim-gptp"
 COPY ns3/nominal "$NS3_ROOT/scratch/syncsim-nominal"
+COPY ns3/congestion "$NS3_ROOT/scratch/syncsim-congestion"
+COPY ns3/feedback "$NS3_ROOT/scratch/syncsim-feedback"
 
 # Minimal module set (core data-plane + clock/gPTP spike needs only these,
 # nothing wireless/routing-protocol-heavy) to keep the build fast --
