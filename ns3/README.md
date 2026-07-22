@@ -251,4 +251,32 @@ the project's existing quality bar for OMNeT++/INET.
   `queueLength:vector` export not yet emitted). **Not yet confirmed in real CI**
   -- same Docker-daemon caveat. Full evidence, schema, and honest notes in
   `OBSERVABILITY.md`.
+- **CI/CD + GitHub Pages: wired in `.github/workflows/ci.yml`.** This closes the
+  "not yet confirmed in real CI" caveat every gate above carried -- everything
+  up to this point was proven only by direct compilation in a sandbox with no
+  Docker daemon available. New, fully additive steps in the existing
+  `build-and-smoke` job (nothing about the OMNeT++ M1-M5/Phase B/C1 steps
+  changes): build the `ns3` Docker stage (the first time it's ever actually
+  been built, not just written), run Gates 0/1/2 as binary-exit-code checks,
+  then M2/M3/M4 each as run + `scripts/analyze.py --strict` (the *same*
+  unmodified tool gating the OMNeT++ scenarios) + artifact archive, then the M5
+  sweep + `summarize_sweep.py`. All of it is a real gate (no `if: always()`) --
+  a regression here fails CI, same as the OMNeT++ M1-M5 steps. The visual-report
+  step gained four more `plot_results.py` calls (`ns3-m2-nominal` through
+  `ns3-m5-sweep`, pointed at the *real* `simulations/*.ini` files for the Mermaid
+  diagram/levers, since the topology is identical) writing into the same `site/`
+  the OMNeT++ fragments already populate -- one unchanged "Upload site/" step and
+  one unchanged `deploy-pages` job publish both tracks together, side by side, on
+  the same page. Two small gaps found and fixed while wiring this (see the repo's
+  git history for the fix commit): the CSV-export code didn't create its
+  `--resultDir` if missing (`std::ofstream` doesn't create directories), and
+  `plot_results.py`'s `sweep_bar()`/`BOTTLENECK` constant hadn't gotten the same
+  "reuse a pre-existing CSV" treatment or bracket-free module-name handling the
+  rest of Phase 4 did, so it silently rendered nothing for ns-3 sweep data before
+  the fix. Every step's exact command sequence was dry-run end-to-end in the
+  sandbox (same binaries, same scripts, `NS3_ROOT` pointed at a local build
+  instead of the container path) before being committed -- the one thing that
+  cannot be verified without a Docker daemon is the literal `docker build`/
+  `docker run` layer itself, which only running for real in GitHub's own runners
+  can confirm.
 </content>
