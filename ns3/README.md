@@ -65,5 +65,21 @@ the project's existing quality bar for OMNeT++/INET.
   clean CI container is the next step, per the project's own
   "sandbox proves it can work, CI proves it reproduces" discipline
   (`MIGRATION_HANDOFF.md`).
-- **Gate 1 (Phase 1, steerable clock spike): see `clock/README.md`.**
+- **Gate 1 (Phase 1, steerable clock spike): PASSED in the sandbox.**
+  `clock/clock.{h,cc}` is a clean-room, Apache-2.0 reimplementation of INET's
+  `ConstantDriftOscillator` — a per-node local clock
+  (`local = localBase + (1 + ppm/1e6)*(Now − t0)`) proving R1, the single
+  biggest ns-3 gap (ns-3 natively has only one global clock). `clock-spike.cc`
+  shows two clocks at syncsim's M1 baseline rates (+200 / −350 ppm) diverging
+  from each other and from `Simulator::Now()` at exactly the configured rate
+  (measured slopes 200.000 / −350.000 ppm, recovered from the sampled
+  trajectory), then a mid-run servo action — `AdjustOffset(+1400 µs)` (phase)
+  + `AdjustRate(+350)` (frequency) — steers one clock's offset and drift to ~0
+  while the untouched control clock keeps drifting, proving the clock is
+  programmatically steerable (the precondition for the Phase-2 gPTP servo).
+  Deterministic (byte-identical across two runs; touches no RNG). Exposes a
+  `TracedCallback` sample trace source for observability. **Not yet confirmed
+  in real CI** — same Docker-daemon caveat as Gate 0. Full numeric evidence and
+  the honest licensing caveat (combined ns-3 binary is still GPLv2) in
+  `clock/README.md`.
 </content>
