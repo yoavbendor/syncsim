@@ -27,7 +27,16 @@ ns3/
   feedback/          Phase 3 (M4): finite queues + per-local-clock-aligned
                      bursts from all 12 zone clients; honest coupling-or-not
                      finding. See feedback/README.md.
+  scripts/           run.sh + Phase 4 (M5) run_sweep.sh — thin run wrappers.
+  OBSERVABILITY.md   Phase 4 (Gate 4): CSV-export schema + the real
+                     analyze.py --strict / sweep output against ns-3 data.
 ```
+
+Phase 4 (M5 / observability) is additive on top of the scenario drivers: each
+of `nominal`/`congestion`/`feedback` also writes `vectors.csv`/`scalars.csv`
+(behind `--resultDir`) in `opp_scavetool`'s exact schema, so the real
+OMNeT++-side `scripts/analyze.py` reports on ns-3 runs unchanged. See
+`OBSERVABILITY.md`.
 
 Each `.cc` file here is dropped into a pinned ns-3 checkout's `scratch/`
 directory at Docker build time (see the `ns3` Dockerfile stage) and built as
@@ -204,4 +213,42 @@ the project's existing quality bar for OMNeT++/INET.
   Deterministic (byte-identical across two runs; RNG use is only the 12 seeded
   drift draws — bursts are clock-driven). **Not yet confirmed in real CI** —
   same Docker-daemon caveat. Full numeric evidence in `feedback/README.md`.
+- **Gate 4 (Phase 4, M5 / observability): PASSED in the sandbox.** The real
+  OMNeT++-side analyzer (`scripts/analyze.py`, via `scripts/simdata.py`) and the
+  sweep summarizer (`scripts/summarize_sweep.py`) now run **genuinely against
+  ns-3 output** -- a reuse, not a reimplementation: `analyze.py`'s reporting,
+  sanity-check, hop-grouping, time-windowing, and congestion-summary logic are
+  **untouched**; only the input parsing changed. Each of
+  `nominal`/`congestion`/`feedback-topology.cc` gained a purely additive
+  `--resultDir` (default off -- existing stdout reports and the M2/M3/M4 gate
+  checks are byte-for-byte unchanged, and CSV output is deterministic across two
+  runs) that writes `vectors.csv` (offset trajectories as `Nominal.<node>.clock`
+  / `timeChanged:vector`, so `simdata.HOP_MAPS` and `analyze.py`'s filter match
+  with zero changes) and, for congestion/feedback, `scalars.csv` (per-egress
+  queue counters under INET's exact scalar names and
+  `Nominal.<node>.eth<port>.macLayer.queue` module paths). `gptp.{h,cc}` and
+  `clock.{h,cc}` stay **byte-identical** across every dir (md5sum-confirmed) --
+  this phase only *exports* data the scenarios already compute. One surgical,
+  backward-compatible touch each to `simdata.py` / `summarize_sweep.py`: prefer a
+  pre-existing `vectors.csv`/`scalars.csv` over `opp_scavetool`. **Provably
+  behavior-preserving for the OMNeT++ path by inspection** (not executed -- no
+  OMNeT++ build in this sandbox): `opp_scavetool` is what *produces* those CSVs,
+  so a genuine OMNeT++ result dir never has one before `analyze.py` runs, and the
+  new early-return branch is never taken there. **Real Gate 4 proof (executed):**
+  `analyze.py <dir> --strict --sim-time 30 --time-windows 4` exits 0 / PASS on
+  all three dirs -- nominal's hop peaks (6.25 / 12.44 / 10.56 us) are *identical*
+  to the C++ driver's own report; congestion shows `coreClient` degraded but
+  bounded (peak 46,281 us < 50 ms ceiling) with all 16 others at baseline and the
+  bottleneck queue at 32.6% drop; feedback shows no coupling with the bottleneck
+  at 87.0% drop. The M5 sweep (`ns3/scripts/run_sweep.sh`, driving a new
+  `--queueCapacity` lever mirroring `sweep.ini`'s `${cap = 5, 20, 80}`) produces
+  a real drop-rate-vs-capacity table via the reused `summarize_sweep.py`: ~32.6%
+  drop, nearly flat across cap (the physically correct sustained-overload result;
+  an honest finding, documented). Stretch goal (Mermaid/Pages):
+  `plot_results.py`/`build_site.py` also route through the patched `simdata.py`,
+  so they build a full `index.html` from the ns-3 CSVs with zero further changes
+  -- verified end-to-end; one small deferred gap (backlog/coupling plots need a
+  `queueLength:vector` export not yet emitted). **Not yet confirmed in real CI**
+  -- same Docker-daemon caveat. Full evidence, schema, and honest notes in
+  `OBSERVABILITY.md`.
 </content>
