@@ -82,4 +82,29 @@ the project's existing quality bar for OMNeT++/INET.
   in real CI** — same Docker-daemon caveat as Gate 0. Full numeric evidence and
   the honest licensing caveat (combined ns-3 binary is still GPLv2) in
   `clock/README.md`.
+- **Gate 2 (Phase 2, gPTP servo spike): PASSED in the sandbox.** `gptp/gptp.{h,cc}`
+  is a clean-room, Apache-2.0 minimal IEEE 802.1AS mechanism on the Phase-1
+  `Clock`: per-link peer-delay measurement (1-step Pdelay_Req/Resp),
+  Sync/correction-field propagation through `sw` acting as both slave (toward
+  `gm`) and master (toward `client1`/`client2`) with real residence-time
+  accounting, and a phase-step + integral-frequency servo. `gptp-spike.cc`
+  reproduces M1's exact topology and drift rates (sw 80ppm, client1 200ppm,
+  client2 -350ppm) and its signature: every node's offset-from-GM converges to
+  0.000us and holds (159 servo corrections/node over a 20s run), with peak
+  offset correctly ordered and roughly proportional to |drift| (sw 10.00,
+  client1 25.00, client2 44.76us — within ~2% of INET's own M1 baseline
+  peaks, though per the POC plan the gate is the *mechanism*, not matching
+  those digits). Measured peer delays are real, positive, and stable
+  (6.62us/link). Deterministic (byte-identical across two independent runs).
+  **Passing Gates 1 and 2 together is the POC plan's actual "migration is
+  viable" decision point** — both hold on this pinned ns-3.45. Four explicit,
+  stated simplifications (coarser send/receive-callback timestamping vs
+  INET's streaming-PHY signals, 1-step Pdelay/Sync variants, unity
+  neighborRateRatio, per-port gPTP termination instead of transparent bridging
+  since real gPTP uses a non-forwarded reserved multicast) — none hidden, all
+  in `gptp/README.md`. Does not yet cover multi-hop residence bridges (M2),
+  data-plane congestion coupling (M3/M4), or wire-format/pcap fidelity —
+  deferred to Phase 3. **Not yet confirmed in real CI** — same Docker-daemon
+  caveat as Gates 0/1. Full numeric evidence and the honest licensing caveat
+  in `gptp/README.md`.
 </content>
