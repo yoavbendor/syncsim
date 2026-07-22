@@ -175,4 +175,33 @@ the project's existing quality bar for OMNeT++/INET.
   forward unchanged. Deterministic (byte-identical stdout across two runs).
   **Not yet confirmed in real CI** — same Docker-daemon caveat. Full numeric
   evidence in `congestion/README.md`.
+- **M4 (Phase 3, clock-aligned burst traffic): PASSED in the sandbox —
+  faithful NON-finding, matching INET.** `feedback/feedback-topology.cc` reuses
+  M3's finite-queue mechanism at `packetCapacity = 20` and replaces M3's three
+  independent senders with periodic "frame" bursts from **all 12 zone clients,
+  each scheduled on its OWN gPTP-steered local clock** — so the bursts align in
+  *simulated* time only if gPTP has synced the clients. **M4's gate is not
+  "prove coupling exists"** (`feedback.ini`'s own header says so): INET found
+  real congestion yet gPTP offsets bit-for-bit identical to the no-traffic
+  baseline. The genuinely new primitive is **clock-driven scheduling (S6)**:
+  ns-3's `Simulator::Schedule` takes a *global* delta with no
+  `scheduleForAbsoluteTime` analog, so after each burst a client recomputes its
+  next **absolute local-clock** send instant from its clock's *live* rate+offset
+  (`globalDelta = (targetLocal − currentLocal)/currentRate`) and schedules that —
+  re-anchoring every burst at gPTP's own 0.125 s update granularity (stated as an
+  honest analog, not bit-parity). It works: the 12 clients' bursts land within a
+  **mean 1.153 µs** of each other, emergent purely from sync quality. The
+  microbursts genuinely congest (15 frags × 12 clients ≈ 180 frames/instant vs a
+  20-slot queue → **88.4% drop**, queue hits 20/20). **The finding, reported
+  honestly: NO measurable coupling** — every node's steady-window (`t ≥ 1 s`, so
+  the identical pre-burst transient can't mask small effects) peak offset under
+  bursts is within 0.5 µs of its baseline, reproducing INET's result (Sync lands
+  in the quiet gaps between 100 ms bursts). One honest nuance reconciling M3 and
+  M4: `coreClient` — the sole node sharing the congested queue — is the *only*
+  node with any non-zero delta at all (77 ns; all 16 others exactly 0.000), so
+  M3's localization mechanism is faintly present but negligible at M4's larger
+  queue. Same mechanism, two operating points. Carries S1–S5 forward unchanged.
+  Deterministic (byte-identical across two runs; RNG use is only the 12 seeded
+  drift draws — bursts are clock-driven). **Not yet confirmed in real CI** —
+  same Docker-daemon caveat. Full numeric evidence in `feedback/README.md`.
 </content>
