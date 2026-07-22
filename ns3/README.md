@@ -16,6 +16,11 @@ ns3/
                      pcap data-plane smoke test. No clock/gPTP model.
   clock/             Phase 1 (Gate 1): the clean-room, permissively-licensed
                      steerable per-node drift clock spike. See clock/README.md.
+  gptp/              Phase 2 (Gate 2): clean-room minimal 802.1AS servo spike =
+                     M1 equivalent (GM + 1 bridge + 2 clients). See gptp/README.md.
+  nominal/           Phase 3 (M2 / R-BRIDGE): multi-hop time-aware bridges with
+                     residence-time correction (18 nodes, 3 hop depths). See
+                     nominal/README.md.
 ```
 
 Each `.cc` file here is dropped into a pinned ns-3 checkout's `scratch/`
@@ -107,4 +112,30 @@ the project's existing quality bar for OMNeT++/INET.
   deferred to Phase 3. **Not yet confirmed in real CI** — same Docker-daemon
   caveat as Gates 0/1. Full numeric evidence and the honest licensing caveat
   in `gptp/README.md`.
+- **M2 / R-BRIDGE (Phase 3, multi-hop time-aware bridges): PASSED in the
+  sandbox.** `nominal/nominal-topology.cc` reproduces syncsim's M2 ("Nominal")
+  scenario: 18 nodes across **three hop depths** from the GM — `gm` → `swCore`
+  (hop 1) → {`coreClient`, `swA`, `swB`, `swC`} (hop 2) → 12 zone clients
+  (hop 3) — each an independent Phase-1 `Clock` at M2's drift rates (`swCore`
+  50, `swA` 80, `swB` −60, `swC` 100, `coreClient` 150 ppm; the 12 zone clients
+  draw `uniform(−200,200) ppm` from ns-3's seeded `UniformRandomVariable`). The
+  headline finding: the **Phase-2 `gptp.{h,cc}` needed ZERO changes** to
+  generalize from one bridge hop to a chain — the M2 subdir vendors it
+  **byte-identical** (confirmed by `md5sum`). The additive correction field
+  (`upstreamCorrection + linkDelay + residence`) composes hop-by-hop by
+  construction: `swCore` and each zone switch play the exact dual slave+master
+  role the single Phase-2 `sw` proved, and a bridge is simply "a node with >1
+  port" — nothing counts hops. **Every one of the 18 nodes' offset-from-GM
+  converges to 0.000 µs and holds** (239 servo corrections/node over a 30 s
+  run, 0.125 s Sync interval), across all three depths — the gate. Peak by hop:
+  hops=1 mean/max 6.25; hops=2 mean 12.44 max 18.75; hops=3 mean 10.56 max
+  21.95 µs — reproducing INET's non-obvious finding that peak does **not** grow
+  monotonically with hop count (hops=3 mean < hops=2 mean), because each node's
+  own local drift between corrections dominates its error more than compounding
+  upstream error does; per-node peak tracks `|drift| × interval`, not depth.
+  Deterministic (byte-identical stdout across two runs; only RNG use is the 12
+  seeded drift draws). Carries forward all four Phase-2 simplifications (S1–S4)
+  unchanged; does not yet cover data-plane congestion coupling (M3/M4).
+  **Not yet confirmed in real CI** — same Docker-daemon caveat. Full numeric
+  evidence in `nominal/README.md`.
 </content>

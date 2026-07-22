@@ -306,6 +306,7 @@ RUN git clone --branch ns-3.45 --depth 1 https://gitlab.com/nsnam/ns-3-dev.git "
 COPY ns3/smoke "$NS3_ROOT/scratch/syncsim-smoke"
 COPY ns3/clock "$NS3_ROOT/scratch/syncsim-clock"
 COPY ns3/gptp "$NS3_ROOT/scratch/syncsim-gptp"
+COPY ns3/nominal "$NS3_ROOT/scratch/syncsim-nominal"
 
 # Minimal module set (core data-plane + clock/gPTP spike needs only these,
 # nothing wireless/routing-protocol-heavy) to keep the build fast --
