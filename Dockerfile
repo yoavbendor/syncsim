@@ -20,6 +20,16 @@
 #   docker build --target gui -t syncsim:gui .
 #   docker build --target ide -t syncsim:ide .
 #
+# A fourth, wholly independent target lives at the end of this file:
+#
+#   ns3 -- syncsim's ns-3 migration POC track (NS3_MIGRATION_SURVEY.md /
+#          NS3_MIGRATION_POC_PLAN.md / ns3/README.md). Different toolchain,
+#          different upstream (ns-3.45, GPLv2, fetched fresh from GitLab),
+#          no shared layers or stage chaining with anything above -- OMNeT++/
+#          INET remains authoritative; this is a parallel, non-destructive
+#          spike. Build explicitly:
+#   docker build --target ns3 -t syncsim:ns3 .
+#
 # Pinned versions (INET 4.7.x requires OMNeT++ 6.4.x):
 #   OMNeT++ 6.4.0, INET 4.7.0 -> ships the Gptp + TSN shaper + clock/oscillator
 #   modules this project uses, under INET's post-4.6 reimplementation of both
@@ -264,3 +274,52 @@ RUN test -d "$OMNETPP_ROOT/ide" || { \
     }
 
 ENV AUTOSTART_APP=omnetpp
+
+# =============================================================================
+# Stage: ns3 -- syncsim's ns-3 migration POC track (see ns3/README.md,
+# NS3_MIGRATION_SURVEY.md, NS3_MIGRATION_POC_PLAN.md). Entirely independent
+# of the OMNeT++/INET stages above -- different toolchain, different source
+# fetched at build time, no shared layers, not chained from any prior stage.
+# Never built by CI's main gate; a separate, additive job builds/runs this
+# target alongside (not instead of) the headless M1-M5 jobs once wired into
+# ci.yml.
+#
+# Pinned to ns-3.45 (GPLv2) -- a recent, stable point release rather than the
+# latest, to reduce the odds of hitting not-yet-shaken-out regressions during
+# a spike that already stresses corner cases (see ns3/smoke/smoke-topology.cc's
+# header comment for two hit and worked around during Phase 0).
+# =============================================================================
+FROM ubuntu:24.04 AS ns3
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake ninja-build git ca-certificates python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV NS3_ROOT=/opt/ns-3-dev
+RUN git clone --branch ns-3.45 --depth 1 https://gitlab.com/nsnam/ns-3-dev.git "$NS3_ROOT"
+
+# Each subdirectory under ns3/ (smoke/, clock/, ...) becomes its own
+# scratch/ subdirectory; ns-3's build system names the resulting executable
+# target after the .cc file's stem, not the directory, so this layout is
+# purely organizational.
+COPY ns3/smoke "$NS3_ROOT/scratch/syncsim-smoke"
+COPY ns3/clock "$NS3_ROOT/scratch/syncsim-clock"
+
+# Minimal module set (core data-plane + clock/gPTP spike needs only these,
+# nothing wireless/routing-protocol-heavy) to keep the build fast --
+# confirmed in the sandbox spike: ~4 minutes on 4 cores for this set, vs.
+# ns-3's full module list which pulls in far more than this project needs.
+# Runtime asserts/logs stay ON deliberately (see ns3/README.md) -- this is a
+# research sandbox where catching a simulation-model bug matters more than
+# raw throughput, matching the existing OMNeT++/INET stages' quality bar.
+RUN bash -c ' \
+    cd "$NS3_ROOT" \
+    && ./ns3 configure --build-profile=release \
+        --enable-modules=core,network,csma,bridge,point-to-point,applications,internet,flow-monitor \
+        --disable-examples --disable-tests --disable-python \
+        --enable-asserts --enable-logs \
+    && ./ns3 build -j"$(nproc)" \
+    '
+
+WORKDIR /work
