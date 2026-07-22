@@ -21,9 +21,21 @@ import pandas as pd
 
 
 def export_scalars(sca_file: Path) -> pd.DataFrame:
+    # Phase 4 additive branch (mirrors simdata.export_scalars_to_csv, same
+    # behavior-preserving argument): if the swept file is ALREADY a CSV -- the
+    # ns-3 M5 sweep (ns3/scripts/run_sweep.sh) writes one scalars.csv per
+    # iteration, renamed <name>-cap=<value>.csv -- or a pre-exported .csv sibling
+    # of a .sca already exists, read it directly and skip opp_scavetool. A
+    # genuine OMNeT++ .sca directory never has the sibling .csv before this runs
+    # (opp_scavetool is what produces it), so the OMNeT++ path is unchanged.
+    if sca_file.suffix == ".csv":
+        df = pd.read_csv(sca_file)
+        return df[df.get("type", "scalar") == "scalar"] if "type" in df else df
     csv_path = sca_file.with_suffix(".csv")
-    cmd = ["opp_scavetool", "export", "-T", "s", "-F", "CSV-R", "-o", str(csv_path), str(sca_file)]
-    subprocess.run(cmd, check=True)
+    if not csv_path.exists():
+        cmd = ["opp_scavetool", "export", "-T", "s", "-F", "CSV-R", "-o", str(csv_path),
+               str(sca_file)]
+        subprocess.run(cmd, check=True)
     df = pd.read_csv(csv_path)
     return df[df.get("type", "scalar") == "scalar"] if "type" in df else df
 
@@ -39,7 +51,10 @@ def main() -> int:
     result_dir = Path(args.result_dir)
     sca_files = sorted(glob.glob(str(result_dir / f"*-{args.var}=*.sca")))
     if not sca_files:
-        print(f"[sweep] no *-{args.var}=*.sca files in {result_dir}", file=sys.stderr)
+        # Phase 4: ns-3 track writes one pre-exported CSV per iteration (no .sca).
+        sca_files = sorted(glob.glob(str(result_dir / f"*-{args.var}=*.csv")))
+    if not sca_files:
+        print(f"[sweep] no *-{args.var}=*.sca or .csv files in {result_dir}", file=sys.stderr)
         return 1
 
     var_re = re.compile(rf"{re.escape(args.var)}=([^.]+)")
