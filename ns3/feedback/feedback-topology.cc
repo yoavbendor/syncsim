@@ -77,6 +77,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -718,6 +719,9 @@ main(int argc, char* argv[])
     // ---- Phase 4: optional CSV export (the bursts pass) --------------------
     if (!resultDir.empty())
     {
+        // See nominal-topology.cc's matching comment: std::ofstream doesn't
+        // create missing directories, found during independent verification.
+        std::filesystem::create_directories(resultDir);
         WriteVectorsCsv(resultDir, meta, bg.traj);
         WriteScalarsCsv(resultDir + "/scalars.csv", bg.queueCounters);
     }

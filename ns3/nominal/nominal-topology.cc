@@ -71,6 +71,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -449,6 +450,13 @@ main(int argc, char* argv[])
     // ---- Phase 4: optional CSV export for scripts/analyze.py ----------------
     if (!resultDir.empty())
     {
+        // std::ofstream silently fails (no exception, just a bad stream) if the
+        // target directory doesn't exist yet -- found during independent
+        // verification of this phase's work (a WARN was printed and the file
+        // never appeared). scripts/run.sh's mkdir -p "$RESULT_DIR" for the
+        // OMNeT++ path does this implicitly; do the ns-3 equivalent here so
+        // --resultDir doesn't require the caller to pre-create the directory.
+        std::filesystem::create_directories(resultDir);
         WriteVectorsCsv(resultDir, meta, g_traj);
     }
 

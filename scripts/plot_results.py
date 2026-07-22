@@ -37,7 +37,13 @@ from simdata import (  # noqa: E402
     parse_series,
 )
 
+# OMNeT++'s array-gate module-name syntax. The ns-3 track (Phase 4) uses the
+# equivalent module without brackets ("...eth1..."), since ns-3 has no gate
+# syntax -- matching against both keeps this constant working for either
+# source without needing a CLI flag; an OMNeT++ result never contains the
+# bracket-free form, so this is purely additive.
 BOTTLENECK = "Nominal.swCore.eth[1].macLayer.queue"
+BOTTLENECK_ALIASES = {BOTTLENECK, "Nominal.swCore.eth1.macLayer.queue"}
 
 
 def _offset_series(df: pd.DataFrame) -> dict[str, tuple[list[float], list[float]]]:
@@ -50,6 +56,17 @@ def _offset_series(df: pd.DataFrame) -> dict[str, tuple[list[float], list[float]
         if t and v:
             out[r["module"]] = (t, v)
     return out
+
+
+def _resolve_bottleneck(df: pd.DataFrame) -> str:
+    """Whichever BOTTLENECK_ALIASES form actually appears in this df's modules
+    (OMNeT++'s bracket form or ns-3's bracket-free form); falls back to the
+    OMNeT++ form (existing behavior) if neither is present."""
+    present = set(df.get("module", pd.Series(dtype=str)))
+    for alias in BOTTLENECK_ALIASES:
+        if alias in present:
+            return alias
+    return BOTTLENECK
 
 
 def _queue_series(df: pd.DataFrame, module: str) -> tuple[list[float], list[float]]:
@@ -85,7 +102,7 @@ def plot_offsets(offsets, out_png: Path, title: str) -> str | None:
 
 
 def plot_backlog(df, out_png: Path, title: str) -> str | None:
-    t, v = _queue_series(df, BOTTLENECK)
+    t, v = _queue_series(df, _resolve_bottleneck(df))
     if not t:
         return None
     fig, ax = plt.subplots(figsize=(9, 3.2))
@@ -102,7 +119,7 @@ def plot_backlog(df, out_png: Path, title: str) -> str | None:
 
 def plot_coupling(offsets, df, out_png: Path, title: str) -> str | None:
     cc = next((m for m in offsets if m.endswith("coreClient.clock")), None)
-    tq, vq = _queue_series(df, BOTTLENECK)
+    tq, vq = _queue_series(df, _resolve_bottleneck(df))
     if cc is None or not tq:
         return None
     to, vo = offsets[cc]
@@ -149,15 +166,28 @@ def plot_hopbar(offsets, out_png: Path, title: str) -> str | None:
 
 
 def sweep_bar(result_dir: Path, out_png: Path, title: str) -> tuple[str | None, list[tuple[str, float]]]:
+    # Phase 4 additive branch, same reasoning as simdata.export_scalars_to_csv
+    # and summarize_sweep.py's matching patch: prefer .sca (OMNeT++, exported
+    # via opp_scavetool as before) but fall back to a pre-exported .csv sibling
+    # (the ns-3 M5 sweep in ns3/scripts/run_sweep.sh writes these directly, no
+    # opp_scavetool available). A genuine OMNeT++ sweep dir always has .sca
+    # files, so that path is unchanged.
     sca_files = sorted(glob.glob(str(result_dir / "*-cap=*.sca")))
+    is_csv = False
+    if not sca_files:
+        sca_files = sorted(glob.glob(str(result_dir / "*-cap=*.csv")))
+        is_csv = True
     pts = []
     for f in sca_files:
         cap = Path(f).name.split("cap=")[1].split(".")[0]
-        csv = Path(f).with_suffix(".csv")
-        subprocess.run(["opp_scavetool", "export", "-T", "s", "-F", "CSV-R", "-o", str(csv), f], check=True)
+        if is_csv:
+            csv = Path(f)
+        else:
+            csv = Path(f).with_suffix(".csv")
+            subprocess.run(["opp_scavetool", "export", "-T", "s", "-F", "CSV-R", "-o", str(csv), f], check=True)
         sdf = pd.read_csv(csv)
         sdf = sdf[sdf.get("type", "scalar") == "scalar"] if "type" in sdf else sdf
-        mod = sdf[sdf["module"] == BOTTLENECK]
+        mod = sdf[sdf["module"].isin(BOTTLENECK_ALIASES)]
 
         def sc(name):
             r = mod[mod["name"] == name]
@@ -200,7 +230,7 @@ def narrative_single(offsets, df) -> list[str]:
             f"Most devices stay tightly synced (around {typical:.0f} microseconds), but one -- "
             f"{nm} -- degrades to {worst_peak:.0f} microseconds, roughly {worst_peak / max(typical, 1):.0f}x worse, "
             f"because it shares a congested link with heavy data traffic.")
-    t, v = _queue_series(df, BOTTLENECK)
+    t, v = _queue_series(df, _resolve_bottleneck(df))
     if v and max(v) > 1:
         lines.append(
             f"The shared bottleneck queue fills up (peak {max(v):.0f} packets), the visible cause of the strain.")
