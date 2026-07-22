@@ -71,10 +71,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -119,6 +121,62 @@ RxTrampoline(syncsim::GptpEntity* ent,
     return ent->OnDeviceReceive(port, pkt, from);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 4 (M5 / observability) -- export the per-node offset trajectories in
+// the SAME long-form CSV schema OMNeT++'s opp_scavetool produces, so the real
+// OMNeT++-side analyzer (scripts/analyze.py, via simdata.py) reads this ns-3
+// run with ZERO reimplementation. analyze.py filters
+//   df[(df["name"] == "timeChanged:vector") & df["module"].str.endswith(".clock")]
+// and simdata.parse_offset_series computes offset = vecvalue - vectime, treating
+// vecvalue as each sample's LOCAL clock time and vectime as the global sim time.
+// So we emit, per traced clock, one row with module "Nominal.<node>.clock" (the
+// exact form simdata.HOP_MAPS["Nominal"] already regex-matches for hop grouping),
+// name "timeChanged:vector", vectime = global seconds, and vecvalue = local clock
+// time = global + offset (offset is stored here in us, so *1e-6). This is purely
+// additive: nothing above changes, and the file is only written when --resultDir
+// is set (default off), so the proven stdout/gate behavior is untouched.
+void
+WriteVectorsCsv(const std::string& dir,
+                const std::vector<NodeMeta>& meta,
+                const std::map<int, std::vector<OffsetSample>>& traj)
+{
+    std::string path = dir + "/vectors.csv";
+    std::ofstream f(path);
+    if (!f)
+    {
+        std::cerr << "[nominal] WARN: cannot write " << path << "\n";
+        return;
+    }
+    f << "module,name,vectime,vecvalue\n";
+    uint32_t written = 0;
+    for (const auto& [id, samples] : traj)
+    {
+        if (samples.empty())
+        {
+            continue;
+        }
+        std::string module = "Nominal." + meta[id].name + ".clock";
+        std::ostringstream vt, vv;
+        vt << std::setprecision(15);
+        vv << std::setprecision(15);
+        for (size_t i = 0; i < samples.size(); ++i)
+        {
+            if (i)
+            {
+                vt << ' ';
+                vv << ' ';
+            }
+            double g = samples[i].global;
+            vt << g;
+            vv << (g + samples[i].offset * 1e-6); // local clock time = global + offset
+        }
+        f << module << ",timeChanged:vector,\"" << vt.str() << "\",\"" << vv.str() << "\"\n";
+        ++written;
+    }
+    std::cout << "[nominal] wrote " << path << " (" << written << " clock vectors, "
+              << "opp_scavetool-schema)\n";
+}
+
 } // namespace
 
 int
@@ -128,11 +186,16 @@ main(int argc, char* argv[])
     double syncIntervalMs = 125.0;  // INET default gPTP syncInterval
     double pdelayIntervalMs = 50.0; // peer-delay refresh
     double finalTolUs = 2.0;        // "final offset near 0" tolerance
+    std::string resultDir = "";     // Phase 4: dir for vectors.csv (empty = skip)
     CommandLine cmd(__FILE__);
     cmd.AddValue("simTime", "Simulation duration (s)", simTime);
     cmd.AddValue("syncInterval", "gPTP Sync interval (ms)", syncIntervalMs);
     cmd.AddValue("pdelayInterval", "Peer-delay interval (ms)", pdelayIntervalMs);
     cmd.AddValue("finalTol", "Final-offset tolerance (us)", finalTolUs);
+    cmd.AddValue("resultDir",
+                 "Phase 4: directory to write vectors.csv (opp_scavetool schema) "
+                 "for scripts/analyze.py; empty = skip (default)",
+                 resultDir);
     cmd.Parse(argc, argv);
 
     // Deterministic. The only RNG use below is the 12 client drift draws; pinning
@@ -382,6 +445,12 @@ main(int argc, char* argv[])
                          "of time-aware bridges on ns-3.45"
                        : "GATE FAIL")
               << std::endl;
+
+    // ---- Phase 4: optional CSV export for scripts/analyze.py ----------------
+    if (!resultDir.empty())
+    {
+        WriteVectorsCsv(resultDir, meta, g_traj);
+    }
 
     return pass ? 0 : 1;
 }

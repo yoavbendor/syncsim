@@ -72,10 +72,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -105,6 +107,45 @@ struct OffsetSample
     double offset; // microseconds
 };
 
+// Phase 4 (M5 / observability): per-egress-queue counters, accumulated from the
+// ns-3 Queue Enqueue/Dequeue/Drop traces, then written out as scalars in the
+// exact schema INET's queue scalars use so scripts/analyze.py's congestion
+// summary (regex \.macLayer\.queue$ + names incomingPackets:count etc.) reads
+// this ns-3 run unchanged. incoming = enqueued + dropped (everything that
+// arrived at the queue); dropped = overflow drops; outgoing = dequeued. Lengths
+// are in BITS (INET's PacketQueue convention), so we sum GetSize()*8.
+struct QueueCounters
+{
+    std::string module;
+    uint64_t enqPk{0};
+    uint64_t deqPk{0};
+    uint64_t dropPk{0};
+    double enqBits{0};
+    double deqBits{0};
+    double dropBits{0};
+};
+
+void
+QEnqueue(QueueCounters* q, Ptr<const Packet> p)
+{
+    q->enqPk++;
+    q->enqBits += p->GetSize() * 8.0;
+}
+
+void
+QDequeue(QueueCounters* q, Ptr<const Packet> p)
+{
+    q->deqPk++;
+    q->deqBits += p->GetSize() * 8.0;
+}
+
+void
+QDrop(QueueCounters* q, Ptr<const Packet> p)
+{
+    q->dropPk++;
+    q->dropBits += p->GetSize() * 8.0;
+}
+
 // State that lives across a single runScenario() pass. A pointer to the active
 // pass's state is stashed in g_active so static trampolines (bound into ns-3
 // callbacks) can reach it without per-callback captures.
@@ -119,6 +160,7 @@ struct PassState
     uint64_t backlogSamples{0};
     uint32_t backlogMax{0};
     Ptr<Queue<Packet>> bottleneckQueue;
+    std::vector<QueueCounters> queueCounters; // Phase 4: per-switch-egress scalars
 };
 
 PassState* g_active = nullptr;
@@ -188,6 +230,78 @@ DataSource(Ptr<NetDevice> dev,
     Simulator::Schedule(Seconds(gap->GetValue()), &DataSource, dev, peer, gap, stopAt);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 4 (M5 / observability): CSV export in OMNeT++ opp_scavetool schema so
+// scripts/analyze.py reads this ns-3 run with zero reimplementation. See
+// nominal-topology.cc's WriteVectorsCsv comment for the offset-from-GM trick;
+// here we additionally emit queue scalars (INET's names) from the congested
+// pass so analyze.py's Mbps/pps/drop-ppm congestion summary lights up too.
+void
+WriteVectorsCsv(const std::string& dir,
+                const std::vector<NodeMeta>& meta,
+                const std::map<int, std::vector<OffsetSample>>& traj)
+{
+    std::string path = dir + "/vectors.csv";
+    std::ofstream f(path);
+    if (!f)
+    {
+        std::cerr << "[congestion] WARN: cannot write " << path << "\n";
+        return;
+    }
+    f << "module,name,vectime,vecvalue\n";
+    uint32_t written = 0;
+    for (const auto& [id, samples] : traj)
+    {
+        if (samples.empty())
+        {
+            continue;
+        }
+        std::string module = "Nominal." + meta[id].name + ".clock";
+        std::ostringstream vt, vv;
+        vt << std::setprecision(15);
+        vv << std::setprecision(15);
+        for (size_t i = 0; i < samples.size(); ++i)
+        {
+            if (i)
+            {
+                vt << ' ';
+                vv << ' ';
+            }
+            double g = samples[i].global;
+            vt << g;
+            vv << (g + samples[i].offset * 1e-6); // local clock time = global + offset
+        }
+        f << module << ",timeChanged:vector,\"" << vt.str() << "\",\"" << vv.str() << "\"\n";
+        ++written;
+    }
+    std::cout << "[congestion] wrote " << path << " (" << written << " clock vectors)\n";
+}
+
+void
+WriteScalarsCsv(const std::string& path, const std::vector<QueueCounters>& qcs)
+{
+    std::ofstream f(path);
+    if (!f)
+    {
+        std::cerr << "[congestion] WARN: cannot write " << path << "\n";
+        return;
+    }
+    f << "module,name,value\n";
+    f << std::setprecision(15);
+    for (const auto& q : qcs)
+    {
+        uint64_t inPk = q.enqPk + q.dropPk;       // everything that arrived
+        double inBits = q.enqBits + q.dropBits;
+        f << q.module << ",incomingPackets:count," << inPk << "\n";
+        f << q.module << ",outgoingPackets:count," << q.deqPk << "\n";
+        f << q.module << ",droppedPacketsQueueOverflow:count," << q.dropPk << "\n";
+        f << q.module << ",incomingPacketLengths:sum," << inBits << "\n";
+        f << q.module << ",outgoingPacketLengths:sum," << q.deqBits << "\n";
+        f << q.module << ",droppedPacketLengths:sum," << q.dropBits << "\n";
+    }
+    std::cout << "[congestion] wrote " << path << " (" << qcs.size() << " queue scalar groups)\n";
+}
+
 struct Stat
 {
     double peak;
@@ -233,8 +347,15 @@ runScenario(bool background,
         state.ent[id] = ent[id].get();
     }
 
-    // Switch egress devices get the finite queue.
+    // Switch egress devices get the finite queue. switchDevNames carries the
+    // INET-style module path (Nominal.<node>.eth<port>.macLayer.queue) for each,
+    // for the Phase 4 scalar export -- port index = the gPTP port index, which
+    // matches nominal.ned's port order (swCore: eth0=gm, eth1=coreClient, ...).
     std::vector<Ptr<CsmaNetDevice>> switchDevs;
+    std::vector<std::string> switchDevNames;
+    auto qname = [&](int node, uint32_t port) {
+        return "Nominal." + meta[node].name + ".eth" + std::to_string(port) + ".macLayer.queue";
+    };
 
     // link a<->b; aIsMaster picks gPTP roles. aIsSwitch/bIsSwitch mark switch
     // egresses (finite queue). Returns the device container for data wiring.
@@ -247,10 +368,12 @@ runScenario(bool background,
         if (aIsSwitch)
         {
             switchDevs.push_back(DynamicCast<CsmaNetDevice>(dv.Get(0)));
+            switchDevNames.push_back(qname(a, pa));
         }
         if (bIsSwitch)
         {
             switchDevs.push_back(DynamicCast<CsmaNetDevice>(dv.Get(1)));
+            switchDevNames.push_back(qname(b, pb));
         }
         return dv;
     };
@@ -273,6 +396,18 @@ runScenario(bool background,
     for (auto& d : switchDevs)
     {
         d->GetQueue()->SetAttribute("MaxSize", QueueSizeValue(QueueSize(PACKETS, queueCap)));
+    }
+    // Phase 4: per-queue counters for the scalar export. Sized once (pointers into
+    // it must stay stable), then Enqueue/Dequeue/Drop traces accumulate per queue.
+    state.queueCounters.assign(switchDevs.size(), QueueCounters{});
+    for (size_t i = 0; i < switchDevs.size(); ++i)
+    {
+        state.queueCounters[i].module = switchDevNames[i];
+        QueueCounters* qc = &state.queueCounters[i];
+        Ptr<Queue<Packet>> q = switchDevs[i]->GetQueue();
+        q->TraceConnectWithoutContext("Enqueue", MakeBoundCallback(&QEnqueue, qc));
+        q->TraceConnectWithoutContext("Dequeue", MakeBoundCallback(&QDequeue, qc));
+        q->TraceConnectWithoutContext("Drop", MakeBoundCallback(&QDrop, qc));
     }
     // Bottleneck = swCore->coreClient egress queue: trace drops + sample backlog.
     Ptr<NetDevice> bottleneckDev = coreToCoreClient.Get(0); // swCore's side
@@ -347,13 +482,22 @@ main(int argc, char* argv[])
     double meanGapUs = 160.0;    // congestion.ini productionInterval = exponential(160us)
     double degradeFactor = 5.0;  // coreClient peak must degrade >= this x baseline
     double isolationTolUs = 5.0; // every other node must stay within this of baseline
+    std::string resultDir = "";  // Phase 4: dir for vectors.csv + scalars.csv (empty = skip)
     CommandLine cmd(__FILE__);
     cmd.AddValue("simTime", "Simulation duration (s)", simTime);
     cmd.AddValue("bgStart", "When background traffic starts (s)", bgStart);
     cmd.AddValue("syncInterval", "gPTP Sync interval (ms)", syncIntervalMs);
     cmd.AddValue("pdelayInterval", "Peer-delay interval (ms)", pdelayIntervalMs);
     cmd.AddValue("queueCap", "Switch egress queue capacity (packets)", queueCap);
+    // Phase 4 / M5 sweep knob: --queueCapacity is an alias for --queueCap, named
+    // to mirror sweep.ini's `${cap = 5, 20, 80}` (packetCapacity) so ns3/scripts/
+    // run_sweep.sh drives the same lever OMNeT++'s sweep.ini does.
+    cmd.AddValue("queueCapacity", "Alias for queueCap (mirrors sweep.ini cap)", queueCap);
     cmd.AddValue("meanGap", "Mean data inter-packet gap (us)", meanGapUs);
+    cmd.AddValue("resultDir",
+                 "Phase 4: directory to write vectors.csv + scalars.csv (opp_scavetool "
+                 "schema, congested pass) for scripts/analyze.py; empty = skip (default)",
+                 resultDir);
     cmd.Parse(argc, argv);
 
     RngSeedManager::SetSeed(1);
@@ -485,6 +629,16 @@ main(int argc, char* argv[])
                          "congested egress queue), not globally"
                        : "GATE FAIL")
               << std::endl;
+
+    // ---- Phase 4: optional CSV export (the CONGESTED pass) ------------------
+    // The congested pass carries both the isolation signature (coreClient's
+    // bounded-but-degraded offset, everyone else at baseline) and the real queue
+    // drops, so analyze.py --strict reports the full picture off one directory.
+    if (!resultDir.empty())
+    {
+        WriteVectorsCsv(resultDir, meta, bg.traj);
+        WriteScalarsCsv(resultDir + "/scalars.csv", bg.queueCounters);
+    }
 
     return pass ? 0 : 1;
 }

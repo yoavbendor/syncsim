@@ -77,10 +77,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -112,6 +114,41 @@ struct OffsetSample
     double offset; // microseconds
 };
 
+// Phase 4 (M5 / observability): per-egress-queue counters (see
+// congestion-topology.cc for the schema rationale). incoming = enqueued +
+// dropped; lengths in bits (INET convention).
+struct QueueCounters
+{
+    std::string module;
+    uint64_t enqPk{0};
+    uint64_t deqPk{0};
+    uint64_t dropPk{0};
+    double enqBits{0};
+    double deqBits{0};
+    double dropBits{0};
+};
+
+void
+QEnqueue(QueueCounters* q, Ptr<const Packet> p)
+{
+    q->enqPk++;
+    q->enqBits += p->GetSize() * 8.0;
+}
+
+void
+QDequeue(QueueCounters* q, Ptr<const Packet> p)
+{
+    q->deqPk++;
+    q->deqBits += p->GetSize() * 8.0;
+}
+
+void
+QDrop(QueueCounters* q, Ptr<const Packet> p)
+{
+    q->dropPk++;
+    q->dropBits += p->GetSize() * 8.0;
+}
+
 // Per-client burst scheduling context (S6). clock is borrowed (owned by the
 // scenario). nextK is the next burst index; target local time = burstStart +
 // nextK*burstIntervalMs.
@@ -141,6 +178,7 @@ struct PassState
     double burstStartS{1.0};
     double burstIntervalMs{100.0};
     double simTime{30.0};
+    std::vector<QueueCounters> queueCounters; // Phase 4: per-switch-egress scalars
 };
 
 PassState* g_active = nullptr;
@@ -234,6 +272,77 @@ ScheduleNextBurst(int ci)
     Simulator::Schedule(Seconds(globalDeltaS), &FireBurst, ci);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 4 (M5 / observability): CSV export in OMNeT++ opp_scavetool schema so
+// scripts/analyze.py reads this ns-3 run with zero reimplementation. See
+// nominal/congestion-topology.cc for the offset-from-GM trick and the queue
+// scalar schema. Here we export the bursts pass.
+void
+WriteVectorsCsv(const std::string& dir,
+                const std::vector<NodeMeta>& meta,
+                const std::map<int, std::vector<OffsetSample>>& traj)
+{
+    std::string path = dir + "/vectors.csv";
+    std::ofstream f(path);
+    if (!f)
+    {
+        std::cerr << "[feedback] WARN: cannot write " << path << "\n";
+        return;
+    }
+    f << "module,name,vectime,vecvalue\n";
+    uint32_t written = 0;
+    for (const auto& [id, samples] : traj)
+    {
+        if (samples.empty())
+        {
+            continue;
+        }
+        std::string module = "Nominal." + meta[id].name + ".clock";
+        std::ostringstream vt, vv;
+        vt << std::setprecision(15);
+        vv << std::setprecision(15);
+        for (size_t i = 0; i < samples.size(); ++i)
+        {
+            if (i)
+            {
+                vt << ' ';
+                vv << ' ';
+            }
+            double g = samples[i].global;
+            vt << g;
+            vv << (g + samples[i].offset * 1e-6); // local clock time = global + offset
+        }
+        f << module << ",timeChanged:vector,\"" << vt.str() << "\",\"" << vv.str() << "\"\n";
+        ++written;
+    }
+    std::cout << "[feedback] wrote " << path << " (" << written << " clock vectors)\n";
+}
+
+void
+WriteScalarsCsv(const std::string& path, const std::vector<QueueCounters>& qcs)
+{
+    std::ofstream f(path);
+    if (!f)
+    {
+        std::cerr << "[feedback] WARN: cannot write " << path << "\n";
+        return;
+    }
+    f << "module,name,value\n";
+    f << std::setprecision(15);
+    for (const auto& q : qcs)
+    {
+        uint64_t inPk = q.enqPk + q.dropPk;
+        double inBits = q.enqBits + q.dropBits;
+        f << q.module << ",incomingPackets:count," << inPk << "\n";
+        f << q.module << ",outgoingPackets:count," << q.deqPk << "\n";
+        f << q.module << ",droppedPacketsQueueOverflow:count," << q.dropPk << "\n";
+        f << q.module << ",incomingPacketLengths:sum," << inBits << "\n";
+        f << q.module << ",outgoingPacketLengths:sum," << q.deqBits << "\n";
+        f << q.module << ",droppedPacketLengths:sum," << q.dropBits << "\n";
+    }
+    std::cout << "[feedback] wrote " << path << " (" << qcs.size() << " queue scalar groups)\n";
+}
+
 struct Stat
 {
     double peak;        // global max |offset| over the whole run
@@ -281,6 +390,10 @@ runScenario(bool bursts,
     }
 
     std::vector<Ptr<CsmaNetDevice>> switchDevs;
+    std::vector<std::string> switchDevNames; // Phase 4: INET-style queue module paths
+    auto qname = [&](int node, uint32_t port) {
+        return "Nominal." + meta[node].name + ".eth" + std::to_string(port) + ".macLayer.queue";
+    };
     auto link = [&](int a, int b, bool aIsMaster, bool aIsSwitch, bool bIsSwitch) {
         NetDeviceContainer dv = csma.Install(NodeContainer(nodes.Get(a), nodes.Get(b)));
         uint32_t pa = ent[a]->AddPort(dv.Get(0), dv.Get(1)->GetAddress(), aIsMaster);
@@ -290,10 +403,12 @@ runScenario(bool bursts,
         if (aIsSwitch)
         {
             switchDevs.push_back(DynamicCast<CsmaNetDevice>(dv.Get(0)));
+            switchDevNames.push_back(qname(a, pa));
         }
         if (bIsSwitch)
         {
             switchDevs.push_back(DynamicCast<CsmaNetDevice>(dv.Get(1)));
+            switchDevNames.push_back(qname(b, pb));
         }
         return dv;
     };
@@ -315,6 +430,18 @@ runScenario(bool bursts,
     for (auto& d : switchDevs)
     {
         d->GetQueue()->SetAttribute("MaxSize", QueueSizeValue(QueueSize(PACKETS, queueCap)));
+    }
+    // Phase 4: per-queue counters for the scalar export (stable storage; traces
+    // accumulate per queue over the run).
+    state.queueCounters.assign(switchDevs.size(), QueueCounters{});
+    for (size_t i = 0; i < switchDevs.size(); ++i)
+    {
+        state.queueCounters[i].module = switchDevNames[i];
+        QueueCounters* qc = &state.queueCounters[i];
+        Ptr<Queue<Packet>> q = switchDevs[i]->GetQueue();
+        q->TraceConnectWithoutContext("Enqueue", MakeBoundCallback(&QEnqueue, qc));
+        q->TraceConnectWithoutContext("Dequeue", MakeBoundCallback(&QDequeue, qc));
+        q->TraceConnectWithoutContext("Drop", MakeBoundCallback(&QDrop, qc));
     }
     state.bottleneckDev = coreToCoreClient.Get(0);
     state.bottleneckPeer = coreToCoreClient.Get(1)->GetAddress();
@@ -398,6 +525,7 @@ main(int argc, char* argv[])
     double pdelayIntervalMs = 50.0;
     uint32_t queueCap = 20; // feedback.ini packetCapacity = 20
     double couplingTolUs = 0.5; // "identical to baseline" tolerance for the finding
+    std::string resultDir = "";  // Phase 4: dir for vectors.csv + scalars.csv (empty = skip)
     CommandLine cmd(__FILE__);
     cmd.AddValue("simTime", "Simulation duration (s)", simTime);
     cmd.AddValue("burstStart", "When bursts start, local (s)", burstStartS);
@@ -405,6 +533,10 @@ main(int argc, char* argv[])
     cmd.AddValue("syncInterval", "gPTP Sync interval (ms)", syncIntervalMs);
     cmd.AddValue("pdelayInterval", "Peer-delay interval (ms)", pdelayIntervalMs);
     cmd.AddValue("queueCap", "Switch egress queue capacity (packets)", queueCap);
+    cmd.AddValue("resultDir",
+                 "Phase 4: directory to write vectors.csv + scalars.csv (opp_scavetool "
+                 "schema, bursts pass) for scripts/analyze.py; empty = skip (default)",
+                 resultDir);
     cmd.Parse(argc, argv);
 
     RngSeedManager::SetSeed(1);
@@ -582,6 +714,13 @@ main(int argc, char* argv[])
                          "bursts + real congestion); coupling finding reported above"
                        : "GATE FAIL")
               << std::endl;
+
+    // ---- Phase 4: optional CSV export (the bursts pass) --------------------
+    if (!resultDir.empty())
+    {
+        WriteVectorsCsv(resultDir, meta, bg.traj);
+        WriteScalarsCsv(resultDir + "/scalars.csv", bg.queueCounters);
+    }
 
     return pass ? 0 : 1;
 }
