@@ -104,10 +104,13 @@ right structural reason. `gptp.{h,cc}` needed **no** change (it is transport-agn
 talking to `NetDevice::Send`/`SetReceiveCallback`), verified byte-identical across
 all four vendored copies. See `ns3/spikes/P3A_SPIKE_FINDINGS.md`.
 
-**pcap regression (disclosed):** `SimpleNetDeviceHelper` is not a
-`PcapHelperForDevice` — it has no `EnablePcap`/`EnablePcapAll`, so **P2c's pcap
-capture no longer works** on this scenario (`--pcapPrefix` is now a warned no-op).
-The P3a spike predicted this. See the "pcap" section below.
+**pcap restored:** `SimpleNetDeviceHelper` has no `EnablePcap`/`EnablePcapAll`
+convenience wrapper (`SimpleNetDevice` exposes no `PromiscSniffer`/`Sniffer`
+trace source for a helper to auto-hook), but ns-3's own low-level pcap
+primitives — `PcapHelper::CreateFile` + `PcapFileWrapper::Write`, the same
+machinery `CsmaHelper::EnablePcapInternal` calls internally — are public API
+and work fine called by hand. `--pcapPrefix` capture is fully working again;
+see the "pcap" section below.
 
 ## Result — **GATE PASS** (sandbox, ns-3.45, release build, asserts on)
 
@@ -285,25 +288,35 @@ linuxptp PI idea + a first-principles floor estimator, no ptp4l/INET source read
   [PASS] every OTHER node stays within 5 us of its baseline (isolation)
 ```
 
-## pcap capture (P2c) — **REGRESSED by the P3a S5 fix (known follow-up gap)**
+## pcap capture (P2c) — **restored under the S5 transport**
 
-The S5 transport swap traded pcap capture for full-duplex forwarding. `CsmaHelper`
-is a `PcapHelperForDevice` (it has `EnablePcapAll`); ns-3.45's
-`SimpleNetDeviceHelper` **is not** — it has no `EnablePcap`/`EnablePcapAll` at all
-(verified in the pinned tree). The P3a spike predicted exactly this. So on this
-scenario **`--pcapPrefix` is now a warned no-op** — it prints a warning to stderr
-and writes nothing. `ns3/scripts/check_pcap_gptp.py` is unaffected (still correct
-for CSMA-format captures such as `nominal-topology`'s, which still uses CSMA), it
-just has no congestion capture to check anymore.
+`CsmaHelper` is a `PcapHelperForDevice` (it has `EnablePcapAll`); ns-3.45's
+`SimpleNetDeviceHelper` **is not** — it has no `EnablePcap`/`EnablePcapAll`
+convenience wrapper, and `SimpleNetDevice` itself exposes no
+`PromiscSniffer`/`Sniffer` trace source for a helper to auto-hook (both
+verified directly against the pinned tree). But the convenience wrapper isn't
+the only way in: ns-3's own low-level pcap primitives —
+`PcapHelper::CreateFile()` + `PcapFileWrapper::Write()` — are public API, the
+exact same calls `CsmaHelper::EnablePcapInternal` makes internally. `link()`'s
+`PcapCapture` hook calls them by hand, once per device, from inside
+`CombinedRx` — the single place every frame this topology carries (gPTP *and*
+data) already passes through, so no `gptp.{h,cc}` change is needed. Capturing
+on RX only (rather than TX+RX like CSMA's trace) is content-equivalent on this
+point-to-point topology: every frame sent by one device is received by exactly
+one other, so it's captured exactly once, just filed under the receiving
+device's `.pcap` instead of duplicated under both link ends. Since
+`SimpleNetDevice` doesn't carry a real Ethernet header on the wire (addressing
+is out-of-band via a `SimpleTag`), the hook synthesizes one (14-byte
+dst/src/ethertype) so the capture is genuinely classic-Ethernet, DLT_EN10MB —
+`ns3/scripts/check_pcap_gptp.py` parses it unchanged from the old CSMA format.
 
-Restoring capture would mean hand-rolling a per-device `PcapWriter` on
-`SimpleNetDevice`'s `PhyRxDrop`/tx path (its trace surface differs from CSMA's and
-does not emit real Ethernet framing) — a bounded but non-trivial follow-up, left
-as a **known gap** rather than fought here, per the plan's "disclose, don't
-silently drop" instruction. The main S5 forwarding fix is the priority; observability
-of the data plane is instead available through `analyze.py`'s per-queue Mbps/pps/drop
-summary (which now shows the real per-hop forwarding) and the `queueLength:vector`
-backlog export (P1b), both still working.
+Verified: a 5s `--pcapPrefix` run wrote 34 non-empty per-device `.pcap` files
+(one per device, matching every link in the topology);
+`check_pcap_gptp.py` against the whole directory reports genuine, parseable
+gPTP traffic with all five message types present (including the 2-step
+`PdelayRespFollowUp`/`FollowUp`), exit 0 PASS. With `--pcapPrefix` unset,
+stdout stays byte-identical and zero files are written (verified, gate
+unaffected).
 
 ## What this does and does not establish
 
@@ -319,9 +332,10 @@ backlog export (P1b), both still working.
   real forwarding rather than egress injection.
 - **Does not (deferred / simplified):** full adaptive ptp4l-grade servo behavior
   (P1a hardens the loop to a bounded PI with missed-Sync skip + a peer-delay
-  outlier filter, but not a full spike-rejection state machine), **pcap capture on
-  this scenario** (regressed by the S5 transport swap — see the pcap section; a
-  known follow-up gap), and **IEEE-TLV-dissectable** wire format (Tier 3).
+  outlier filter, but not a full spike-rejection state machine), and
+  **IEEE-TLV-dissectable** wire format (Tier 3) — this project's own 19-byte
+  `GptpHeader`, not real 802.1AS TLVs, is what gets captured (pcap capture
+  itself is restored, see the pcap section above).
   Carries S1 forward unchanged and S4 is deliberate; **S2 (2-step framing) closed
   by P2b**, **S3 (`neighborRateRatio`) closed by P2a**, **S5 (hop-by-hop
   forwarding) closed by P3a**; the P1a servo/peer-delay hardening stands.

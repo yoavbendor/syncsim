@@ -236,11 +236,13 @@ result is reported as data, per `feedback.ini`'s own standard.
   measurably degraded at any node — a faithful reproduction of INET's M4 non-finding
   (bit-identical offsets), now with zero coupling everywhere.
 - **Does not (deferred / simplified):** perfect `scheduleForAbsoluteTime`
-  re-anchoring (S6), **pcap capture** (regressed by the S5 transport swap —
-  `SimpleNetDeviceHelper` has no `EnablePcap`; `--pcapPrefix` is now a warned no-op,
-  a known follow-up gap, same as `congestion/README.md`), and **IEEE-TLV** wire
-  format (Tier 3). Carries S1 forward unchanged and S4 is deliberate; **S2 closed by
-  P2b**, **S3 closed by P2a**, **S5 (hop-by-hop forwarding) closed by P3a**.
+  re-anchoring (S6), and **IEEE-TLV** wire format (Tier 3) — pcap capture itself
+  is restored (see `congestion/README.md`'s pcap section — same manual
+  `PcapHelper::CreateFile`/`PcapFileWrapper::Write` hook, ported unchanged;
+  verified here too: `check_pcap_gptp.py` PASS on a fresh capture, all five
+  message types present). Carries S1 forward unchanged and S4 is deliberate;
+  **S2 closed by P2b**, **S3 closed by P2a**, **S5 (hop-by-hop forwarding)
+  closed by P3a**.
 
 ### Honest licensing note
 

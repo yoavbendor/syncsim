@@ -214,13 +214,32 @@ PassState* g_active = nullptr;
 
 // P2c: pcap capture prefix. Empty (default) = OFF, so gate behavior/stdout are
 // byte-identical when unset. When set (--pcapPrefix), only the bursts pass is
-// captured, via CsmaHelper::EnablePcapAll (Phase 0's proven mechanism).
+// captured, via link()'s manual per-device PcapCapture hook (see its comment).
 std::string g_pcapPrefix;
 
 void
 OffsetSink(int id, Time global, double offsetSec)
 {
     g_active->traj[id].push_back({global.GetSeconds(), offsetSec * 1e6});
+}
+
+// P2c pcap capture (restored under the S5 transport): manual hook of ns-3's own
+// low-level pcap primitives (PcapHelper::CreateFile + PcapFileWrapper::Write) --
+// see congestion-topology.cc's PcapCapture comment for the full rationale (same
+// mechanism, ported unchanged). RX-only per device is content-equivalent to
+// CSMA's old per-device TX+RX capture on this point-to-point topology.
+void
+PcapCapture(Ptr<PcapFileWrapper> file,
+           Address dst,
+           Ptr<const Packet> pkt,
+           uint16_t protocol,
+           const Address& from)
+{
+    EthernetHeader hdr(false);
+    hdr.SetSource(Mac48Address::ConvertFrom(from));
+    hdr.SetDestination(Mac48Address::ConvertFrom(dst));
+    hdr.SetLengthType(protocol);
+    file->Write(Simulator::Now(), hdr, pkt);
 }
 
 // Dispatch by ethertype: gPTP -> per-port GptpEntity (S4 termination, NOT
@@ -230,11 +249,16 @@ bool
 CombinedRx(int nodeId,
            syncsim::GptpEntity* ent,
            uint32_t port,
-           Ptr<NetDevice>,
+           Ptr<PcapFileWrapper> pcapFile,
+           Ptr<NetDevice> device,
            Ptr<const Packet> pkt,
            uint16_t protocol,
            const Address& from)
 {
+    if (pcapFile)
+    {
+        PcapCapture(pcapFile, device->GetAddress(), pkt, protocol, from);
+    }
     if (protocol == kGptpProtocol)
     {
         return ent->OnDeviceReceive(port, pkt, from);
@@ -512,8 +536,22 @@ runScenario(bool bursts,
         NetDeviceContainer dv = simple.Install(NodeContainer(nodes.Get(a), nodes.Get(b)));
         uint32_t pa = ent[a]->AddPort(dv.Get(0), dv.Get(1)->GetAddress(), aIsMaster);
         uint32_t pb = ent[b]->AddPort(dv.Get(1), dv.Get(0)->GetAddress(), !aIsMaster);
-        dv.Get(0)->SetReceiveCallback(MakeBoundCallback(&CombinedRx, a, ent[a].get(), pa));
-        dv.Get(1)->SetReceiveCallback(MakeBoundCallback(&CombinedRx, b, ent[b].get(), pb));
+        // P2c pcap: one capture file per device, RX-hooked in CombinedRx (see
+        // PcapCapture's comment). Only the bursts pass is captured (the
+        // interesting one), matching the original CsmaHelper::EnablePcapAll scope.
+        Ptr<PcapFileWrapper> fileA, fileB;
+        if (bursts && !g_pcapPrefix.empty())
+        {
+            PcapHelper ph;
+            fileA = ph.CreateFile(g_pcapPrefix + "-" + meta[a].name + "-" + std::to_string(pa) +
+                                      ".pcap",
+                                  std::ios::out, PcapHelper::DLT_EN10MB);
+            fileB = ph.CreateFile(g_pcapPrefix + "-" + meta[b].name + "-" + std::to_string(pb) +
+                                      ".pcap",
+                                  std::ios::out, PcapHelper::DLT_EN10MB);
+        }
+        dv.Get(0)->SetReceiveCallback(MakeBoundCallback(&CombinedRx, a, ent[a].get(), pa, fileA));
+        dv.Get(1)->SetReceiveCallback(MakeBoundCallback(&CombinedRx, b, ent[b].get(), pb, fileB));
         if (aIsSwitch)
         {
             switchDevs.push_back(DynamicCast<SimpleNetDevice>(dv.Get(0)));
@@ -625,17 +663,8 @@ runScenario(bool bursts,
                             Seconds(simTime));
     }
 
-    // P2c pcap: REGRESSED by the S5 transport swap (disclosed). SimpleNetDeviceHelper
-    // is not a PcapHelperForDevice -- no EnablePcap/EnablePcapAll (unlike CsmaHelper).
-    // The P3a spike predicted this. --pcapPrefix is honored as a warned no-op;
-    // restoring capture needs a manual per-device Phy-trace PcapWriter (follow-up
-    // gap; see feedback/README.md and ns3/OBSERVABILITY.md).
-    if (bursts && !g_pcapPrefix.empty())
-    {
-        std::cerr << "[feedback] WARN: --pcapPrefix is a no-op under the S5 full-duplex "
-                     "SimpleNetDevice transport (no EnablePcap on SimpleNetDeviceHelper). "
-                     "See README's 'pcap' note.\n";
-    }
+    // P2c pcap capture is wired up above, in link()'s per-device PcapCapture
+    // hook -- see that function's comment for how it works under SimpleNetDevice.
 
     Simulator::Stop(Seconds(simTime));
     Simulator::Run();
@@ -691,8 +720,9 @@ main(int argc, char* argv[])
                  "schema, bursts pass) for scripts/analyze.py; empty = skip (default)",
                  resultDir);
     cmd.AddValue("pcapPrefix",
-                 "P2c pcap prefix (REGRESSED by the S5 SimpleNetDevice transport swap -- "
-                 "SimpleNetDeviceHelper has no EnablePcap; now a warned no-op, see README)",
+                 "P2c: enable pcap capture (one file per device, bursts pass only) with "
+                 "this file prefix; empty = off (default). Manual capture under the S5 "
+                 "SimpleNetDevice transport -- see link()'s PcapCapture comment.",
                  g_pcapPrefix);
     cmd.Parse(argc, argv);
 
