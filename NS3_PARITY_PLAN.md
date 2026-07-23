@@ -349,12 +349,20 @@ gPTP's per-port termination (S4) stays untouched. `gptp.{h,cc}` needed **no** ch
   `analyze.py --strict` PASS on fresh congestion + feedback CSVs (and now visibly
   shows the per-hop forwarding: ~46.5 Mbps per zone uplink aggregating to ~139.5 Mbps
   at the bottleneck).
-- **Regression cost (disclosed):** P2c pcap capture is **lost on these two
-  scenarios** — `SimpleNetDeviceHelper` is not a `PcapHelperForDevice` (no
-  `EnablePcap`). `--pcapPrefix` is now a warned no-op; restoring it needs a manual
-  per-device Phy-trace `PcapWriter` (a bounded but non-trivial follow-up gap, left
-  open). `nominal`/`gptp-spike` keep CSMA + working pcap. Data-plane observability
-  remains via `analyze.py`'s per-queue summary and the P1b `queueLength:vector`.
+- **P2c pcap — briefly regressed, then restored (same session):** `SimpleNetDeviceHelper`
+  has no `EnablePcap`/`EnablePcapAll` convenience wrapper (`SimpleNetDevice` exposes
+  no `PromiscSniffer`/`Sniffer` trace source for a helper to auto-hook, confirmed
+  against the pinned tree). But ns-3's own low-level pcap primitives —
+  `PcapHelper::CreateFile()` + `PcapFileWrapper::Write()`, the exact calls
+  `CsmaHelper::EnablePcapInternal` makes internally — are public API and work fine
+  called by hand. `link()`'s new `PcapCapture` hook does exactly that, once per
+  device, from inside each scenario's existing `CombinedRx` receive path (RX-only,
+  content-equivalent to CSMA's old TX+RX capture on a point-to-point topology; a
+  synthetic 14-byte Ethernet header is written since `SimpleNetDevice` carries none
+  on the wire). No `gptp.{h,cc}` change needed. Verified: fresh captures on both
+  scenarios are non-empty and `check_pcap_gptp.py` PASSes with all five message
+  types present; the unset-prefix gate path stays byte-identical. `--pcapPrefix`
+  works on all four scenarios again.
 
 ### P3b — YAML-topology equivalent for ns-3
 
@@ -407,7 +415,7 @@ part of this plan.
 | P2b 2-step framing | 1 wk | Low–medium (new state machine surface) | **Mostly no, but proven empirically NOT to be free**: identical to ≤1 ns in Gate2/M2/M4; under M3's heavy loss it genuinely shifts the peak (510→429 µs) + servo count (170→90) — a faithful 2-step loss property, isolation intact |
 | P2c pcap capture | 3–5 days | Low — reuses Phase 0's proven mechanism | No — **DONE**, opt-in, gates byte-identical when off |
 | P2d sim-time normalization | trivial | None | No — **DONE**, peaks unchanged (transient), counts ~2× |
-| P3a S5 fix (spike + real fix) | ✅ **DONE** | Was unknown; spike said bounded, real fix confirmed it | **Yes** — M3 peak 429→551 µs, M4 coupling 0.695→0.000 µs, isolation shape exact; pcap regressed on these two scenarios (disclosed) |
+| P3a S5 fix (spike + real fix) | ✅ **DONE** | Was unknown; spike said bounded, real fix confirmed it | **Yes** — M3 peak 429→551 µs, M4 coupling 0.695→0.000 µs, isolation shape exact; P2c pcap briefly regressed then restored (manual `PcapHelper`/`PcapFileWrapper` hook) |
 | P3b YAML topology | 2–4 wk if pursued | Medium | No |
 | P3c IEEE TLV wire format | 2–4 wk if pursued | Medium | No |
 | P3d GUI tooling | Not recommended | — | — |
