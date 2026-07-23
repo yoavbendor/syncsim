@@ -47,7 +47,7 @@ treatment:
 | S4 | Per-port gPTP termination, no transparent bridging | *Not a gap* | Deliberate — real 802.1AS gPTP uses a non-forwarded reserved multicast | N/A — arguably more correct than a transparent bridge | — |
 | **S5** | **Background congestion traffic injected at the bottleneck egress, not truly forwarded hop-by-hop** | **Shape-level, real root cause** | **Mainline ns-3's `CsmaChannel` is half-duplex shared-medium; a real forwarding attempt spuriously coupled every node's sync (confirmed empirically)** | **Shape — a real topological difference from INET** | 3 |
 | S6 | Approximate clock-driven burst scheduling (recomputed per-burst, not true mid-flight re-anchoring) | Precision-only | ns-3 has no `scheduleForAbsoluteTime` primitive | Precision only — still genuinely clock-driven | 2 |
-| — | **M3 servo lock-loss transient**: congested peak 24× larger than INET's | **Real, undamped anomaly** | Phase 2's deadbeat-phase + naive-integral-frequency servo overreacts to a wild rate estimate after a sporadically missed Sync | **Magnitude — the one number this undermines trust in** | **1** |
+| — | **M3 servo lock-loss transient**: congested peak 24× larger than INET's — ✅ **FIXED (P1a): 46,281 µs → 510 µs** | **Real, undamped anomaly** | Phase 2's deadbeat-phase + naive-integral-frequency servo overreacting to a wild rate estimate after a sporadically missed Sync — **plus** (found during the fix) a peer-delay `d` corrupted to tens of ms by Pdelay contention on the saturated shared CSMA medium, the dominant driver | **Magnitude — the one number this undermined trust in** | **1** |
 | — | `queueLength:vector` not exported | Missing capability, cheap | Never wired up in Phase 4 | Blocks Pages backlog/coupling plots for ns-3 (already-scaffolded code, missing data) | **1** |
 | — | No pcap capture/replay past Phase 0's smoke test | Missing capability, moderate | Not built | Debuggability gap; own-format capture/replay is cheap, IEEE-dissectable capture is not (see Tier 3) | 2 |
 | — | No YAML-topology-DSL equivalent (Phase B) | Missing capability, large | Not built | Every ns-3 topology is hand-coded C++, not data-driven | 3 |
@@ -65,7 +65,45 @@ treatment:
 These don't chase new fidelity — they make the numbers the ns-3 track
 **already produced** trustworthy at face value.
 
-### P1a — Harden the servo
+### P1a — Harden the servo — ✅ **DONE**
+
+**Status (done):** M3's congested `coreClient` peak went **46,280.929 µs →
+510.471 µs** (24× outlier → below INET's 1,949.64 µs, same order of magnitude).
+The isolation shape is unchanged — all 16 other nodes still ratio exactly 1.0x
+(base peak == congested peak). Regression: Gate 2, M2, M4 all still PASS,
+deterministic (byte-identical stdout across two runs each). The fix was two
+clean-room changes in the vendored `gptp.{h,cc}` (re-vendored byte-identical
+across `gptp/`, `nominal/`, `congestion/`, `feedback/`):
+
+1. **Hardened PI servo** (public linuxptp control-loop idea, no ptp4l source):
+   damped proportional phase + a **bounded, low-pass integral** frequency term
+   (clamped ±500 ppm, per-cycle step ≤50 ppm, normalized by the *nominal* Sync
+   interval), with the frequency update **skipped on any missed-Sync-length
+   cycle** (nominal interval inferred as the running-minimum inter-Sync gap).
+   This replaced the deadbeat-phase + fresh unbounded `offset/elapsed` estimate.
+   It cut the peak 46,281 → ~20,500 µs (~2.3×).
+2. **Peer-delay outlier filter** (running-minimum estimator) — **the dominant
+   fix**, discovered during P1a verification. With the servo loop stabilized, the
+   residual ~20 ms peak traced to the measured link delay `d` inflating to
+   15–22 ms (≈1000× its true ~2–3 µs) because the Pdelay handshake frames contend
+   on the *saturated shared CSMA medium* (the S5 artifact reaching the peer-delay
+   path). A corrupted `d` injects a false offset any servo faithfully chases. The
+   true delay is a physical floor, so a running-minimum estimator (established by
+   the ~20 clean pre-congestion Pdelay exchanges) rejects the inflated samples.
+   This took the peak ~20,500 → 510 µs. **510 µs is the genuine congested-queue
+   Sync-delay signal** (a Sync waiting behind a near-full 10-packet queue), the
+   real M3 mechanism measured cleanly.
+
+Side effect (disclosed, all gates still green): the damped phase makes clean
+scenarios' startup transient ~1.29× larger (e.g. gptp-spike client1 25.00 →
+32.20 µs; nominal coreClient 18.75 → 24.08 µs). The gated properties (convergence
+to ~0, drift-proportional ordering) are unchanged/tighter. M4's finding flipped
+label — from a ~77 ns non-finding to a genuine but sub-µs 0.695 µs coupling
+localized entirely to `coreClient` (all 16 others exactly 0.000) — reported
+honestly rather than forced back; the physical conclusion (aligned microbursts do
+not meaningfully degrade sync) holds.
+
+---
 
 Root cause, precisely: the current servo (`gptp.cc`'s `ApplyServo`) nulls the
 *entire* measured offset every Sync (deadbeat phase correction) and estimates

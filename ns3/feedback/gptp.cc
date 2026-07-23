@@ -10,6 +10,7 @@
 #include "ns3/packet.h"
 #include "ns3/simulator.h"
 
+#include <algorithm>
 #include <ostream>
 
 namespace syncsim {
@@ -181,7 +182,30 @@ GptpEntity::HandlePdelayResp(uint32_t portIndex, const GptpHeader& in)
     Time t3 = in.GetTb();
     // meanLinkDelay = ((t4 - t1) - (t3 - t2)) / 2
     Time rt = (t4 - t1) - (t3 - t2);
-    p.linkDelay = rt / 2;
+    Time cand = rt / 2;
+
+    // Peer-delay OUTLIER FILTER (P1a). The true link delay is a physical FLOOR
+    // (propagation + one serialization, S1) and static for a given link;
+    // contention only ever ADDS to a measured round trip. Under M3's congestion
+    // the Pdelay handshake frames contend on the saturated shared CSMA medium
+    // (the S5 shared-medium artifact reaching the peer-delay path), inflating a
+    // single measured `cand` to tens of milliseconds -- ~1000x the real ~few-us
+    // delay. A corrupted peer delay feeds straight into HandleSync's
+    // reconstructed GM time and injects a false offset that ANY servo would
+    // faithfully (and wrongly) chase, which is what dominated M3's congested
+    // peak once the servo loop itself was hardened. Because the true delay is a
+    // floor, a running MINIMUM of the positive samples is a robust,
+    // self-calibrating estimator immune to congestion inflation: the ~20 clean
+    // pre-congestion Pdelay exchanges establish it, and later contention-inflated
+    // samples never lower it. Non-positive candidates (a transient from a servo
+    // phase step landing mid-handshake) are rejected outright.
+    if (cand.GetSeconds() > 0.0)
+    {
+        if (p.linkDelay == Time(0) || cand < p.linkDelay)
+        {
+            p.linkDelay = cand;
+        }
+    }
 }
 
 // ---- Sync / Follow_Up with residence-time correction ---------------------
@@ -282,33 +306,69 @@ GptpEntity::RelayDownstream(Time originTs,
     ApplyServo(offsetSecForServo);
 }
 
-// ---- Servo ---------------------------------------------------------------
+// ---- Servo (P1a hardened PI loop) ----------------------------------------
 //
-// Phase step (deadbeat) + integral frequency correction, steering the Phase-1
-// Clock via AdjustOffset / AdjustRate. This is real gPTP servo behavior: null
-// the current phase error each Sync, and drive the residual frequency error to
-// zero over a few cycles so the offset converges to ~0 (not a bare sawtooth).
-// The public linuxptp PI idea was reimplemented here; no source was copied (S,
-// see gptp.h header).
+// Proportional (damped) phase step + BOUNDED integral frequency correction,
+// steering the Phase-1 Clock via AdjustOffset / AdjustRate, with missed-Sync
+// outlier handling. See the SERVO block in gptp.h for the full rationale; this
+// reimplements the public linuxptp PI control-loop idea (no ptp4l source read).
+//
+// Why this replaces the Phase-2 deadbeat+`offset/elapsed` servo: that servo
+// re-derived a fresh, unbounded rate estimate from a single inter-Sync interval
+// every cycle and applied the whole measured offset as a phase step. When a Sync
+// was dropped/delayed in a congested queue, `elapsed` ballooned and that estimate
+// went wild, and the deadbeat phase rang on it -- the sole cause of M3's 46 ms
+// congested peak. The hardened loop (a) normalizes the frequency term by the
+// inferred NOMINAL interval, not the actual elapsed, and bounds its accumulation;
+// (b) skips the frequency update entirely on a missed-Sync-length cycle; and
+// (c) damps the phase step so no single sample causes a full excursion.
 
 void
 GptpEntity::ApplyServo(double offsetSec)
 {
     Time nowG = ns3::Simulator::Now();
-    // Frequency loop: after the previous cycle's full phase null, the offset now
-    // observed accumulated purely from the residual frequency error over the
-    // inter-Sync interval. Estimate that residual and cancel a fraction of it.
-    if (m_haveLastSync)
+
+    // Inter-Sync gap on the GLOBAL timeline. A dropped Sync makes this balloon to
+    // a multiple of the nominal interval -- the missed-Sync signature.
+    double elapsed = m_haveLastSync ? (nowG - m_lastSyncGlobal).GetSeconds() : 0.0;
+
+    // Infer the nominal Sync interval as the shortest gap seen so far (missed
+    // Syncs only lengthen gaps), then flag anomalously long ones.
+    bool anomalous = false;
+    if (m_haveLastSync && elapsed > 0.0)
     {
-        double elapsed = (nowG - m_lastSyncGlobal).GetSeconds();
-        if (elapsed > 0)
+        if (m_nominalInterval <= 0.0 || elapsed < m_nominalInterval)
         {
-            double residualPpm = (offsetSec / elapsed) * 1e6;
-            m_clock->AdjustRate(-kFreqGain * residualPpm);
+            m_nominalInterval = elapsed;
         }
+        anomalous = elapsed > kMissedSyncFactor * m_nominalInterval;
     }
-    // Phase loop: step local time back onto the reconstructed GM time.
-    m_clock->AdjustOffset(ns3::Seconds(-offsetSec));
+
+    // Integral frequency term: only updated on a CLEAN cycle. Normalize the
+    // implied per-cycle rate error by the NOMINAL interval (constant), never the
+    // actual elapsed, so a ballooned gap cannot scale it; accumulate a low-pass
+    // fraction into a persistent integral, clamped so it can never run away. The
+    // achieved increment (post-clamp) is what we push onto the clock via the
+    // incremental AdjustRate, so m_freqIntegral mirrors the applied correction.
+    if (m_haveLastSync && !anomalous && m_nominalInterval > 0.0)
+    {
+        double impliedPpm = (offsetSec / m_nominalInterval) * 1e6;
+        double step = -kIntegralGain * impliedPpm;
+        // Per-cycle step clamp: one late-from-a-congested-queue Sync reads a big
+        // phase offset that is not a frequency error, so cap how far a single
+        // sample can move the integral (opposite-signed jitter then averages out).
+        step = std::clamp(step, -kMaxFreqStepPpm, kMaxFreqStepPpm);
+        double target = std::clamp(m_freqIntegral + step, -kFreqClampPpm, kFreqClampPpm);
+        double achievedInc = target - m_freqIntegral;
+        m_clock->AdjustRate(achievedInc);
+        m_freqIntegral = target;
+    }
+
+    // Proportional phase term: step a damped fraction of the measured offset back
+    // onto the reconstructed GM time (deadbeat = 1.0 would amplify one late Sync
+    // into a full excursion; kPhaseGain < 1 rejects a single bad sample while
+    // still converging in a few clean cycles).
+    m_clock->AdjustOffset(ns3::Seconds(-kPhaseGain * offsetSec));
 
     m_lastSyncGlobal = nowG;
     m_haveLastSync = true;

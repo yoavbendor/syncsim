@@ -53,6 +53,44 @@
 //       construction (same 4-node/3-link shape) and attach our own per-device
 //       receive callbacks instead of a bridge. See gptp-spike.cc.
 // ---------------------------------------------------------------------------
+// SERVO (P1a, Tier 1 -- hardened; supersedes the Phase-2 first-spike servo).
+//
+// The Phase-2 servo was a DEADBEAT phase step (null the entire measured offset
+// every Sync) plus a naive integral frequency term that re-derived a fresh rate
+// estimate `offset / elapsed` each cycle, where `elapsed` was the ACTUAL global
+// time since the previous Sync. Under congestion, when a Sync toward a node is
+// sporadically dropped or badly delayed in the shared egress queue, `elapsed`
+// balloons to a multiple of the Sync interval and that single-interval rate
+// estimate goes wild -- an unbounded, badly-wrong frequency correction that the
+// deadbeat phase step then rings on for several cycles. That is the sole source
+// of M3's 24x-outlier congested peak (see congestion/README.md); the isolation
+// SHAPE was always correct, only this one magnitude was untrustworthy.
+//
+// The hardened servo reimplements the well-understood public linuxptp PI
+// control-loop IDEA (same clean-room discipline as the original -- the public
+// algorithm, never ptp4l source), with two robustness properties the first
+// spike lacked:
+//
+//   (a) PROPORTIONAL phase + BOUNDED INTEGRAL frequency. The phase loop steps a
+//       damped fraction (kPhaseGain < 1) of the measured offset instead of the
+//       full deadbeat step, so a single jittered/late Sync cannot inject a full
+//       excursion. The frequency loop accumulates a low-pass correction into a
+//       persistent integral (kIntegralGain per cycle), CLAMPED to +-kFreqClampPpm,
+//       and -- crucially -- normalized by the NOMINAL Sync interval (a constant),
+//       never by the actual elapsed time, so a ballooned gap cannot scale it.
+//   (b) MISSED-SYNC OUTLIER HANDLING. The nominal Sync interval is inferred at
+//       run time as the minimum inter-Sync gap observed (missed Syncs only ever
+//       lengthen the gap). A cycle whose elapsed time exceeds kMissedSyncFactor x
+//       that nominal is treated as a missed-Sync recovery: its phase is still
+//       corrected (damped), but its frequency-integral update is SKIPPED, so a
+//       single anomalously-long gap can no longer corrupt the frequency estimate.
+//
+// Still simplified vs. a production port: single fixed PI gain pair (no adaptive
+// state machine / spike-rejection thresholds / step-vs-lock modes that real
+// ptp4l carries), and phase steering via an idealized offset step rather than a
+// frequency-only lock. What it fixes is exactly the undamped, unbounded
+// single-sample overreaction; it does not claim ptp4l-grade servo behavior.
+// ---------------------------------------------------------------------------
 
 #ifndef SYNCSIM_GPTP_H
 #define SYNCSIM_GPTP_H
@@ -187,7 +225,11 @@ class GptpEntity
     void RelayDownstream(ns3::Time originTs, ns3::Time upstreamCorrection,
                          ns3::Time slaveRecvLocal, ns3::Time slaveLinkDelay,
                          double offsetSecForServo);
-    // The servo: step phase + integral frequency correction on the local Clock.
+    // The servo: proportional (damped) phase step + bounded integral frequency
+    // correction on the local Clock, with missed-Sync outlier handling. The
+    // inter-Sync interval it needs is derived internally from Simulator::Now()
+    // and m_lastSyncGlobal, so the call sites (HandleSync/RelayDownstream) are
+    // unchanged. See the SERVO block in the file header for the algorithm.
     void ApplyServo(double offsetSec);
 
     std::string m_name;
@@ -201,6 +243,14 @@ class GptpEntity
     bool m_haveLastSync{false};
     ns3::Time m_lastSyncGlobal{0};
     uint32_t m_servoCount{0};
+    // Bounded integral frequency correction currently applied to the clock
+    // (ppm, cumulative via AdjustRate). Clamped to +-kFreqClampPpm.
+    double m_freqIntegral{0.0};
+    // Inferred nominal inter-Sync interval (s): the minimum inter-Sync gap seen
+    // so far. Missed Syncs only lengthen the gap, so the minimum converges to
+    // the true Sync period without the interval being passed in. <=0 until the
+    // first gap is observed.
+    double m_nominalInterval{0.0};
 
     // Fixed residence delay the bridge waits before regenerating Sync (S1: a
     // real, non-zero processing/queueing time so residence is a measurable,
@@ -209,9 +259,29 @@ class GptpEntity
     // Ethertype for our gPTP frames (IEEE 802 local-experimental, same family as
     // Phase 0's smoke test). Not 0x88F7 -- we are not claiming wire fidelity.
     static constexpr uint16_t kGptpProtocol = 0x88b6;
-    // Servo frequency-loop gain (integral). <1 for robustness; converges in a
-    // few cycles. Phase loop is deadbeat (full offset step each Sync).
-    static constexpr double kFreqGain = 0.6;
+    // Servo gains (P1a hardened PI loop; see the SERVO block in the file header).
+    // kPhaseGain (<1): proportional phase step -- the fraction of the measured
+    //   offset stepped each Sync. Damped (not the old deadbeat 1.0) so one late
+    //   Sync cannot inject a full excursion; still converges in a few cycles.
+    // kIntegralGain (<1): fraction of the implied per-cycle rate error folded
+    //   into the bounded frequency integral each CLEAN cycle.
+    // kFreqClampPpm: symmetric bound on the accumulated frequency integral
+    //   (client drifts are within +-200 ppm; this leaves ample headroom while
+    //   capping any runaway).
+    // kMaxFreqStepPpm: per-cycle bound on how far one Sync can move the frequency
+    //   integral. This is the key jitter defense: a Sync delivered late from a
+    //   congested queue (up to ~800 us behind a full 10-packet queue) reads a
+    //   large phase offset that is NOT a frequency error; capping the per-cycle
+    //   step stops that single sample from swinging the frequency estimate, so
+    //   opposite-signed queue jitter averages out over a burst instead of ringing.
+    // kMissedSyncFactor: a cycle whose elapsed exceeds this multiple of the
+    //   inferred nominal Sync interval is a missed-Sync recovery -- phase is
+    //   still corrected, but the frequency-integral update is skipped.
+    static constexpr double kPhaseGain = 0.7;
+    static constexpr double kIntegralGain = 0.4;
+    static constexpr double kFreqClampPpm = 500.0;
+    static constexpr double kMaxFreqStepPpm = 50.0;
+    static constexpr double kMissedSyncFactor = 1.5;
 
     ns3::TracedCallback<ns3::Time, double> m_offsetTrace;
 };
