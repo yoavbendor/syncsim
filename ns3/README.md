@@ -8,6 +8,11 @@ syncsim's authoritative simulator; this tree exists to prove or kill the two
 make-or-break risks the POC plan identifies before any larger port is
 considered.
 
+**License**: this subtree's own files ([LICENSE](LICENSE), same text as the
+repo root) are Apache-2.0. The *combined, ns-3-linked* binary is still GPLv2 —
+see [`../LICENSING.md`](../LICENSING.md) for the full picture and why that
+distinction matters.
+
 ## Layout
 
 ```
