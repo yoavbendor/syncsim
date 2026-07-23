@@ -214,6 +214,24 @@ main(int argc, char* argv[])
     std::cout << "  (channel Delay=1us + one 100Mbps frame serialization; small,"
                  " positive, stable)\n";
 
+    // Measured neighborRateRatio (S3, closed by P2a): neighbor rate / local rate,
+    // derived from consecutive Pdelay exchanges. The servo steers each local
+    // clock's RATE toward GM, so post-lock the measured ratio converges to ~1
+    // (the local clock now genuinely ticks at GM rate) -- which is precisely why
+    // folding it in leaves steady-state numbers unchanged. We print the residual
+    // deviation from 1.0 in parts-per-billion to show the term is real and live.
+    auto ppb = [](double rr) { return (rr - 1.0) * 1e9; };
+    std::cout << "\n[gptp-spike] measured neighborRateRatio (per-link, S3 closed by P2a):\n";
+    std::cout << std::setprecision(3);
+    std::cout << "  sw   ->gm   : 1 + " << std::setw(9) << ppb(swE.GetNeighborRateRatio(swP0))
+              << " ppb   (sw 80ppm slave of gm 0ppm)\n";
+    std::cout << "  c1   ->sw   : 1 + " << std::setw(9) << ppb(c1E.GetNeighborRateRatio(c1P0))
+              << " ppb   (client1 200ppm slave of sw 80ppm)\n";
+    std::cout << "  c2   ->sw   : 1 + " << std::setw(9) << ppb(c2E.GetNeighborRateRatio(c2P0))
+              << " ppb   (client2 -350ppm slave of sw 80ppm)\n";
+    std::cout << "  (post-lock residual ~ppb; pre-lock it tracks the two ends' full "
+                 "relative drift. Sub-ps effect on the us-scale peer-delay/residence math.)\n";
+
     // Sampled offset trajectory over time (downsampled table).
     std::cout << "\n[gptp-spike] offset-from-GM trajectory (local - reconstructed GM, us)\n";
     std::cout << "  gated on: converges toward ~0, peak scales with |drift|\n";

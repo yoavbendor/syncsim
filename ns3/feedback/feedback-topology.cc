@@ -189,6 +189,11 @@ struct PassState
 
 PassState* g_active = nullptr;
 
+// P2c: pcap capture prefix. Empty (default) = OFF, so gate behavior/stdout are
+// byte-identical when unset. When set (--pcapPrefix), only the bursts pass is
+// captured, via CsmaHelper::EnablePcapAll (Phase 0's proven mechanism).
+std::string g_pcapPrefix;
+
 void
 OffsetSink(int id, Time global, double offsetSec)
 {
@@ -559,6 +564,15 @@ runScenario(bool bursts,
                             Seconds(simTime));
     }
 
+    // P2c: opt-in pcap on every CSMA device (gPTP + burst data path), bursts pass
+    // only. Off by default (empty prefix) so gates/stdout are unchanged. Captures
+    // this project's own GptpHeader wire format (verify with
+    // ns3/scripts/check_pcap_gptp.py -- not Wireshark-dissectable 802.1AS).
+    if (bursts && !g_pcapPrefix.empty())
+    {
+        csma.EnablePcapAll(g_pcapPrefix, false);
+    }
+
     Simulator::Stop(Seconds(simTime));
     Simulator::Run();
     Simulator::Destroy();
@@ -593,7 +607,7 @@ runScenario(bool bursts,
 int
 main(int argc, char* argv[])
 {
-    double simTime = 30.0;
+    double simTime = 60.0; // P2d: normalized to OMNeT++'s 60s (was 30s); override with --simTime
     double burstStartS = 1.0; // let gPTP converge first
     double burstIntervalMs = 100.0;
     double syncIntervalMs = 125.0;
@@ -612,6 +626,10 @@ main(int argc, char* argv[])
                  "Phase 4: directory to write vectors.csv + scalars.csv (opp_scavetool "
                  "schema, bursts pass) for scripts/analyze.py; empty = skip (default)",
                  resultDir);
+    cmd.AddValue("pcapPrefix",
+                 "P2c: enable pcap capture on every CSMA device (gPTP + burst data path, "
+                 "bursts pass) with this file prefix; empty = off (default)",
+                 g_pcapPrefix);
     cmd.Parse(argc, argv);
 
     RngSeedManager::SetSeed(1);

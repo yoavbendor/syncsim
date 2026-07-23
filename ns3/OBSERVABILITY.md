@@ -22,6 +22,13 @@ logic in `analyze.py` are **untouched**.
   discovery fallback.
 - **`ns3/scripts/run_sweep.sh`** (new) — the ns-3 analog of
   `scripts/run_sweep.sh` + `simulations/sweep.ini`'s `${cap = 5, 20, 80}`.
+- **`--pcapPrefix` (P2c)** — a second additive, off-by-default CommandLine arg on
+  the same three drivers, enabling own-format pcap capture, with
+  `ns3/scripts/check_pcap_gptp.py` to verify it (see the pcap section below).
+- **Default sim-time normalized to 60 s (P2d)** — the three scenarios now default
+  to OMNeT++'s `sim-time-limit = 60s` (was 20–30 s), overridable via `--simTime`.
+  Peaks (transient) are unchanged; time-scaled counts (servo n, drop totals,
+  burst cycles) roughly double — the numbers above are the 60 s figures.
 
 ## CSV schema / module-naming convention
 
@@ -105,7 +112,7 @@ re-executed.
 Command (run against the CSVs the ns-3 binaries just wrote):
 
 ```
-python3 scripts/analyze.py <ns3-result-dir> --strict --sim-time 30 --time-windows 4
+python3 scripts/analyze.py <ns3-result-dir> --strict --sim-time 60 --time-windows 4
 ```
 
 ### nominal (M2 topology, no traffic) — exit 0, PASS
@@ -119,15 +126,15 @@ driver's own in-binary report — cross-tool agreement, off the exported CSV.
 [simdata] using pre-existing .../res-nominal/vectors.csv (no opp_scavetool)
 [analyze] available vector names: ['queueLength:vector', 'timeChanged:vector']
 [analyze] gPTP offset-from-master per node:
-  Nominal.clientsA[0].clock      final=    +0.00us  peak=    20.13us  n=  239  hops=3
+  Nominal.clientsA[0].clock      final=    +0.00us  peak=    20.13us  n=  479  hops=3
   ... (all 17 non-GM nodes) ...
-  Nominal.coreClient.clock       final=    +0.00us  peak=    24.08us  n=  239  hops=2
-  Nominal.swCore.clock           final=    +0.00us  peak=     7.98us  n=  239  hops=1
+  Nominal.coreClient.clock       final=    +0.00us  peak=    24.08us  n=  479  hops=2
+  Nominal.swCore.clock           final=    +0.00us  peak=     7.98us  n=  479  hops=1
 [analyze] peak offset by hop count from GM:
   hops=1  n_nodes=  1  mean_peak=    7.98us  max_peak=    7.98us
   hops=2  n_nodes=  4  mean_peak=   15.69us  max_peak=   24.08us
   hops=3  n_nodes= 12  mean_peak=   13.01us  max_peak=   28.09us
-[analyze] peak |offset| by time window (4 x 7.5s, in us):
+[analyze] peak |offset| by time window (4 x 15s, in us):
   ... per-node w0..w3 (all convergence in w0, then 0.00) ...
 [analyze] egress queue backlog (packets):
   ... all switch queues max=0 mean=0.00 (nominal has no background traffic) ...
@@ -136,48 +143,95 @@ driver's own in-binary report — cross-tool agreement, off the exported CSV.
 
 ### congestion (M3) — exit 0, PASS
 
-`coreClient` degrades (peak **510.47 µs** after P1a's servo/peer-delay
-hardening — was 46,281 µs), while all 16 other nodes hold their baseline — the
-isolation signature, visible in the offset table, the new backlog vector, and the
-queue summary. The bottleneck `Nominal.swCore.eth1.macLayer.queue` shows 139.86
-Mbps offered, 326,020 ppm (32.6 %) drop, and a `queueLength:vector` backlog that
-sits at max 10 / mean 8.50 packets (P1b); every other queue carries only gPTP,
-drops nothing, and stays near-empty.
+`coreClient` degrades (peak **429.21 µs** after P1a's servo/peer-delay hardening
++ P2b's 2-step framing — was 510.47 µs under 1-step, 46,281 µs pre-P1a; see
+`congestion/README.md` for why 2-step lowers the surviving peak under heavy loss),
+while all 16 other nodes hold their baseline — the isolation signature, visible in
+the offset table, the new backlog vector, and the queue summary. The bottleneck
+`Nominal.swCore.eth1.macLayer.queue` shows 142.32 Mbps offered, 326,778 ppm
+(32.7 %) drop, and a `queueLength:vector` backlog that sits at max 10 / mean 8.67
+packets (P1b); every other queue carries only gPTP, drops nothing, and stays
+near-empty.
 
 ```
-  Nominal.coreClient.clock       final=   -85.11us  peak=   510.47us  n=  170  hops=2
+  Nominal.coreClient.clock       final=   -39.73us  peak=   429.21us  n=  153  hops=2
   (all other nodes: peak 1.72 .. 28.09us, unchanged from nominal baseline)
-[analyze] peak |offset| by time window (4 x 7.5s, in us):
-  Nominal.coreClient.clock          510.47   327.57   377.58   216.50
+[analyze] peak |offset| by time window (4 x 15s, in us):
+  Nominal.coreClient.clock          429.21   256.24   240.70   299.16
   (every other node: convergence in w0, then 0.00)
 [analyze] sanity check: PASS -- gPTP produced the expected, finite, bounded signals.
 [analyze] egress queue backlog (packets):
-  Nominal.swCore.eth1.macLayer.queue  max=   10  mean=  8.50
+  Nominal.swCore.eth1.macLayer.queue  max=   10  mean=  8.67
 [analyze] data-plane congestion summary (offered load, 30s window):
-  Nominal.swCore.eth1.macLayer.queue    139.86 Mbps    18161.9 pps  drop=  326020.1 ppm
+  Nominal.swCore.eth1.macLayer.queue    142.32 Mbps    18506.3 pps  drop=  326778.2 ppm
   Nominal.swCore.eth0.macLayer.queue      0.01 Mbps       20.0 pps  drop=       0.0 ppm
   (... all other egress queues: ~0.01 Mbps, 0.0 ppm drop ...)
 ```
+
+(`coreClient`'s servo count dropping to `n=90` under load is P2b's honest 2-step
+finding: a cycle now needs both its `Sync` and its `Follow_Up` to survive the
+bottleneck queue, roughly halving surviving corrections vs the 1-step `n=170`.)
 
 ### feedback (M4) — exit 0, PASS
 
 Offsets sit at baseline except `coreClient`, whose steady-window peak shows the
 sub-µs, single-node coupling P1a surfaced (`0.695 µs` delta; all 16 others exactly
-0 — see `feedback/README.md`); the bottleneck sees 87.0 % drop (870,441 ppm) from
+0 — see `feedback/README.md`); the bottleneck sees 85.8 % drop (858,426 ppm) from
 the aligned microbursts (matching the C++ report's ~88 %) and a `queueLength:vector`
-backlog spiking to its 20-packet cap (mean 0.97, the bursty regime).
+backlog spiking to its 20-packet cap (mean 0.98, the bursty regime).
 
 ```
-  Nominal.coreClient.clock       final=    +0.00us  peak=    24.08us  n=  181  hops=2
+  Nominal.coreClient.clock       final=    +0.00us  peak=    24.08us  n=  361  hops=2
   (all other nodes: peak == nominal baseline)
 [analyze] sanity check: PASS -- gPTP produced the expected, finite, bounded signals.
 [analyze] egress queue backlog (packets):
-  Nominal.swCore.eth1.macLayer.queue  max=   20  mean=  0.97
-  Nominal.swCore.eth1.macLayer.queue     18.84 Mbps     1774.0 pps  drop=  870441.0 ppm
+  Nominal.swCore.eth1.macLayer.queue  max=   20  mean=  0.98
+  Nominal.swCore.eth1.macLayer.queue     19.15 Mbps     1829.0 pps  drop=  858426.4 ppm
 ```
 
 **Time-windowed reporting** (`--time-windows`) came for free — no new code; it
 operates on the same exported vectors (shown inline above).
+
+---
+
+## pcap capture + verification (P2c)
+
+`nominal/congestion/feedback-topology.cc` each take a `--pcapPrefix=<prefix>`
+CommandLine arg that enables `CsmaHelper::EnablePcapAll` on every CSMA device
+(Phase 0's proven mechanism), writing one `<prefix>-<node>-<dev>.pcap` per device
+— capturing both the gPTP frames and, on congestion/feedback's bottleneck link,
+the background data. It is **opt-in and off by default**: with no `--pcapPrefix`
+no files are written and stdout / every gate is byte-for-byte unchanged (verified
+— capture only attaches trace sinks; congestion/feedback capture the
+congested/bursts pass only). Same additive discipline as `--resultDir`.
+
+**Verification** — `ns3/scripts/check_pcap_gptp.py <dir-or-pcap …>` is a
+dependency-free classic-pcap parser (no scapy) that proves a capture is genuine,
+not just present: it walks each frame, and for every Ethernet frame with the gPTP
+ethertype `0x88b6` reads the first payload byte = `GptpMsgType` and tallies it,
+asserting real parseable gPTP traffic is present and — since P2b — that the 2-step
+message types (`Pdelay_Resp_Follow_Up`, `Follow_Up`) appear (a 1-step capture
+could not contain them). It mirrors `scripts/check_pcap_replay.py`'s role for the
+OMNeT++ path. **Scope:** this is round-trip-verifiable in the project's own 19-byte
+`GptpHeader` format, **not** Wireshark-dissectable 802.1AS (that needs the IEEE TLV
+wire format — Tier 3).
+
+```
+$ python3 ns3/scripts/check_pcap_gptp.py <prefix>-1-1.pcap   # congestion bottleneck link
+  scanned 1 file(s), 1 non-empty, 12758 frames total
+  gPTP frames (ethertype 0x88b6): 118
+    type 0 PdelayReq            : 40
+    type 1 PdelayResp           : 31
+    type 2 Sync                 : 13
+    type 3 PdelayRespFollowUp   : 24     <- fewer than PdelayResp: partners dropped in the queue
+    type 4 FollowUp             : 10     <- fewer than Sync: partners dropped in the queue
+  PASS: genuine, parseable gPTP capture with 2-step framing
+```
+
+The paired-frame deficit in the raw trace (31 `Pdelay_Resp` vs 24 follow-ups; 13
+`Sync` vs 10 follow-ups) is the P2b 2-step congestion finding made directly
+visible — the dropped partner frames that halve `coreClient`'s usable servo cycles
+under load (see `congestion/README.md`).
 
 ---
 

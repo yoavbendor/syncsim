@@ -29,20 +29,49 @@
 //       fine here -- it is a real, non-trivial, positive, stable value, which is
 //       all Gate 2 asks the peer-delay mechanism to prove.
 //
-//   S2. 1-STEP variants. Pdelay_Resp directly carries the responder's receive
-//       (t2) and transmit (t3) timestamps, instead of the real 2-step
-//       Pdelay_Resp + Pdelay_Resp_Follow_Up. Likewise Sync carries the precise
-//       origin timestamp + correction field directly (1-step Sync), folding in
-//       what real 802.1AS splits into Sync + Follow_Up. The information content
-//       is identical; only the number of frames differs.
+//   S2. 2-STEP framing -- CLOSED (P2b, Tier 2). Formerly 1-step: Pdelay_Resp
+//       carried both (t2, t3) and Sync carried the origin timestamp + correction
+//       directly. Now split into the real two-message form:
+//         - Pdelay_Resp carries only the request-receipt timestamp (t2); a
+//           separate Pdelay_Resp_Follow_Up carries the response-origin timestamp
+//           (t3). The requester holds pending state (t2, t4) after the Resp and
+//           completes the peer-delay math when the Follow_Up arrives.
+//         - Sync is a bare marker (its arrival defines the slave's syncRxLocal);
+//           a separate Follow_Up carries the preciseOriginTimestamp + correction
+//           field. The slave holds pending state (syncRxLocal, seq) after the
+//           Sync and runs the servo / bridge relay when the Follow_Up arrives.
+//       P2b's verification confirmed this is informationally identical to the
+//       1-step form IN LOSSLESS / light-loss conditions (Gate 2, M2, M4 all match
+//       the 1-step numbers to <=1 ns, finals 0.000, servo counts identical):
+//       because the bare Sync has the same wire size and slot as the old combined
+//       Sync, the slave's recvLocal is unchanged, and the residence-time
+//       correction self-compensates for the extra Sync->Follow_Up gap at a bridge.
+//       HONEST EXCEPTION, found by verifying rather than assuming (M3 congestion):
+//       under heavy sustained loss the one-extra-frame-per-cycle is a REAL
+//       behavioral difference -- a cycle now counts only if BOTH the Sync and its
+//       Follow_Up survive the lossy queue, so the effective sync rate roughly
+//       halves (coreClient 170 -> 90 servo corrections) and the worst-delayed
+//       samples (whose partner frame was dropped) are filtered out, LOWERING the
+//       surviving congested peak (510 -> 429 us). This is faithful 802.1AS 2-step
+//       behavior (the 1-step form was simply more loss-robust by carrying
+//       everything in one frame); the M3 isolation shape and gate are unchanged.
+//       See congestion/README.md for the full write-up.
 //
-//   S3. neighborRateRatio = 1. Peer-delay and residence-time are computed
-//       treating both link ends as equal-rate clocks. Because every quantity
-//       that uses this (mean link delay, residence time) is a *duration* of a
-//       few microseconds, a residual rate error of even a few hundred ppm over
-//       it is sub-picosecond -- negligible for this spike. Real 802.1AS carries
-//       neighborRateRatio to hit ptp4l-grade precision; a first spike does not
-//       need it (explicitly permitted by the Phase 2 task).
+//   S3. neighborRateRatio -- CLOSED (P2a, Tier 2). Formerly assumed = 1 (both
+//       link ends treated as equal-rate clocks). Now DERIVED per port from two
+//       successive Pdelay exchanges: neighborRateRatio = (neighbor-elapsed) /
+//       (local-elapsed), comparing how far the responder's reported timestamp
+//       (t3) advanced against how far our own receive timestamp (t4) advanced
+//       between the two exchanges, and folded into BOTH the peer-delay math (the
+//       responder turnaround (t3-t2), measured on the neighbor's clock, is
+//       divided by the ratio to express it in our local time base) and the
+//       residence-time correction (a bridge's residence, measured on its local
+//       clock, is scaled by its upstream port's ratio to express it toward GM
+//       time). As S3 always documented and P2a's verification CONFIRMED: at this
+//       project's drift magnitudes (tens-hundreds of ppm) over microsecond
+//       durations the term is provably sub-picosecond, so no observed number
+//       moved to 3+ significant figures -- this closes S3 for protocol
+//       completeness, not to change any result.
 //
 //   S4. gPTP frames are terminated per-port (NOT transparently L2-forwarded).
 //       Phase 0's smoke test installed a BridgeNetDevice on sw; this spike does
@@ -112,17 +141,21 @@ namespace syncsim {
 // gPTP message discriminator carried in GptpHeader::m_type.
 enum class GptpMsgType : uint8_t
 {
-    PdelayReq = 0,  // requester -> responder: "when did this reach you / leave you?"
-    PdelayResp = 1, // responder -> requester: carries t2 (rx) and t3 (tx) [1-step, S2]
-    Sync = 2        // master -> slave: carries preciseOriginTimestamp + correctionField
+    PdelayReq = 0,          // requester -> responder: "when did this reach you / leave you?"
+    PdelayResp = 1,         // responder -> requester: carries t2 (rx) only [2-step, S2 closed]
+    Sync = 2,               // master -> slave: bare marker (its arrival = syncRxLocal) [2-step]
+    PdelayRespFollowUp = 3, // responder -> requester: carries t3 (responder tx of the Resp)
+    FollowUp = 4            // master -> slave: carries preciseOriginTimestamp + correctionField
 };
 
 // Minimal on-the-wire gPTP message. A pragmatic custom ns3::Header (per the
 // Phase 2 task: no IEEE TLV wire-format fidelity needed for Gate 2). Two int64
-// timestamp/field slots are reused per message type:
-//   PdelayReq : ta = requester tx time (t1), tb unused
-//   PdelayResp: ta = responder rx time (t2), tb = responder tx time (t3)
-//   Sync      : ta = preciseOriginTimestamp,  tb = correctionField
+// timestamp/field slots are reused per message type (2-step framing, S2 closed):
+//   PdelayReq          : ta = requester tx time (t1), tb unused
+//   PdelayResp         : ta = responder rx time (t2), tb unused
+//   PdelayRespFollowUp : ta = responder tx time (t3), tb unused
+//   Sync               : bare marker (ta/tb unused; only its arrival time matters)
+//   FollowUp           : ta = preciseOriginTimestamp,  tb = correctionField
 // Timestamps are serialized as int64 femtoseconds (lossless for ns-resolution
 // Time; ample headroom for a 60 s run).
 class GptpHeader : public ns3::Header
@@ -203,6 +236,9 @@ class GptpEntity
     const std::string& GetName() const { return m_name; }
     // Measured mean link delay on a port (0 until first Pdelay completes).
     ns3::Time GetLinkDelay(uint32_t portIndex) const;
+    // Measured neighborRateRatio on a port (S3, P2a): neighbor rate / local rate
+    // (1.0 until two Pdelay exchanges establish it). For scenario reporting.
+    double GetNeighborRateRatio(uint32_t portIndex) const;
     uint32_t GetPortCount() const { return m_ports.size(); }
     uint32_t GetServoCount() const { return m_servoCount; }
 
@@ -215,12 +251,27 @@ class GptpEntity
         ns3::Time linkDelay{0};   // measured mean propagation delay (S1: incl. one serialization)
         uint16_t pdelaySeq{0};    // our outstanding Pdelay_Req seq
         ns3::Time pdelayT1{0};    // local tx time of our outstanding Pdelay_Req
+        // 2-step Pdelay (S2 closed): requester pending state between receiving the
+        // Pdelay_Resp (carries t2) and its Pdelay_Resp_Follow_Up (carries t3).
+        bool pdelayRespSeen{false};
+        ns3::Time pdelayT2{0};    // responder rx (t2), from the Pdelay_Resp
+        ns3::Time pdelayT4{0};    // our rx of the Pdelay_Resp (t4)
+        // neighborRateRatio (S3, closed by P2a): neighbor clock rate / local
+        // clock rate on this link, estimated from consecutive Pdelay exchanges.
+        // 1.0 until the second exchange establishes it. rrPrevT3/rrPrevT4 hold
+        // the previous exchange's responder-tx (t3) and our-rx (t4) timestamps.
+        double neighborRateRatio{1.0};
+        bool haveRrPrev{false};
+        ns3::Time rrPrevT3{0};
+        ns3::Time rrPrevT4{0};
     };
 
     void SendFrame(uint32_t portIndex, const GptpHeader& hdr);
     void HandlePdelayReq(uint32_t portIndex, const GptpHeader& in);
     void HandlePdelayResp(uint32_t portIndex, const GptpHeader& in);
+    void HandlePdelayRespFollowUp(uint32_t portIndex, const GptpHeader& in);
     void HandleSync(uint32_t portIndex, const GptpHeader& in);
+    void HandleFollowUp(uint32_t portIndex, const GptpHeader& in);
     // Bridge relay: regenerate Sync on all master ports after the residence time.
     void RelayDownstream(ns3::Time originTs, ns3::Time upstreamCorrection,
                          ns3::Time slaveRecvLocal, ns3::Time slaveLinkDelay,
@@ -237,7 +288,14 @@ class GptpEntity
     bool m_isGm;
     std::vector<Port> m_ports;
     int m_slavePort{-1};           // index of the (single) slave port, -1 if none
-    uint16_t m_syncSeq{0};         // GM: outgoing Sync seq
+    uint16_t m_syncSeq{0};         // GM/bridge: outgoing Sync seq
+
+    // 2-step Sync (S2 closed): slave pending state between receiving the bare
+    // Sync (whose arrival time IS syncRxLocal) and its Follow_Up (which carries
+    // the origin timestamp + correction field, completing the offset math).
+    bool m_syncPending{false};
+    uint16_t m_syncPendingSeq{0};
+    ns3::Time m_syncRxLocal{0};
 
     // Servo state.
     bool m_haveLastSync{false};

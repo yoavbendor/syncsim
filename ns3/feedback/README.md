@@ -55,7 +55,7 @@ cycles vs 0.125 s servo updates and few-ppm residual drift, the residual anchori
 error is sub-microsecond — far finer than the alignment spread we measure. This is
 the honest analog of `scheduleForAbsoluteTime`, not a claim of bit-parity.
 
-**It works: the 12 clients' bursts land within a mean 1.174 µs of each other**
+**It works: the 12 clients' bursts land within a mean 0.579 µs of each other**
 (see below) — driven purely by how well gPTP synced their clocks, exactly the
 emergent alignment M4 is about.
 
@@ -75,7 +75,15 @@ emergent alignment M4 is about.
   queue — the microburst regime `feedback.ini` describes (a single synchronized
   instant's packet count exceeding queue depth, independent of sustained
   bandwidth).
-- **S1–S4** from Phase 2 carried forward unchanged.
+- **S1/S4** from Phase 2 carried forward unchanged. **S3 (`neighborRateRatio`)
+  closed by P2a** and **S2 (2-step framing) closed by P2b** — folded into /
+  reframed the same peer-delay/Sync path. Their combined effect on M4 is
+  negligible: a handful of steady-window peaks shifted by ≤ 1 ns (last printed
+  digit), `coreClient`'s delta is `0.695 µs` (unchanged from P1a to 3 sig figs),
+  still the sole non-zero node, still above the 0.5 µs tolerance — so the
+  "COUPLING OBSERVED" label is unchanged. Unlike M3 (where 2-step's extra
+  frame-per-cycle bites under heavy loss), M4's light, bursty loss leaves the
+  2-step numbers essentially identical to 1-step.
 
 ## Why gptp/clock are vendored here
 
@@ -99,15 +107,15 @@ Builds as target **`feedback-topology`** →
 
 `feedback-topology` exits `0`. **Deterministic**: byte-identical stdout across two
 runs (`md5sum` matched). The only RNG use is the 12 seeded client drift draws
-(bursts are clock-driven, not random). 30 s run, bursts from local 1.0 s every
+(bursts are clock-driven, not random). 60 s run (P2d: was 30 s), bursts from local 1.0 s every
 100 ms, 15 frags/burst, Sync 0.125 s. Runs **twice in one process** — baseline (no
 bursts) vs bursts.
 
 ### Burst alignment (the emergent quantity — S6 working)
 
 ```
-  full cycles measured : 291
-  mean fire-time spread: 1.174 us   (12 clients agree on "now" to ~1 us => collide)
+  full cycles measured : 591
+  mean fire-time spread: 0.579 us   (12 clients agree on "now" to ~1 us => collide)
   max  fire-time spread: 335.256 us
 ```
 
@@ -119,9 +127,9 @@ settles to ~µs.)
 ### Bottleneck (swCore→coreClient egress, cap 20) under aligned bursts
 
 ```
-  frames offered  : 52380 (15 frags x 12 clients x cycles)
-  delivered       : 6093
-  dropped         : 46324 (88.38% of offered-into-queue)
+  frames offered  : 106380 (15 frags x 12 clients x cycles)
+  delivered       : 12393
+  dropped         : 94202 (88.37% of offered-into-queue)
   queue backlog   : mean 0.33/20, max 20/20
 ```
 
@@ -148,19 +156,19 @@ is the honest coupling measure:
          swCore |  1   |  50.0 |    0.266   |    0.266    |   0.000
      coreClient |  2   | 150.0 |    0.910   |    1.605    |   0.695   <-- only non-zero
             swA |  2   |  80.0 |    0.426   |    0.426    |   0.000
-            swB |  2   | -60.0 |    0.320   |    0.320    |   0.000
-            swC |  2   | 100.0 |    0.537   |    0.537    |   0.000
-    clientsA[0] |  3   | 126.6 |    0.749   |    0.749    |   0.000
-    clientsA[1] |  3   |  42.7 |    0.227   |    0.227    |   0.000
-    clientsA[2] |  3   |  -1.8 |    0.009   |    0.009    |   0.000
+            swB |  2   | -60.0 |    0.321   |    0.321    |   0.000
+            swC |  2   | 100.0 |    0.538   |    0.538    |   0.000
+    clientsA[0] |  3   | 126.6 |    0.748   |    0.748    |   0.000
+    clientsA[1] |  3   |  42.7 |    0.228   |    0.228    |   0.000
+    clientsA[2] |  3   |  -1.8 |    0.010   |    0.010    |   0.000
     clientsA[3] |  3   | -47.4 |    0.252   |    0.252    |   0.000
     clientsB[0] |  3   | -52.4 |    0.279   |    0.279    |   0.000
     clientsB[1] |  3   | 122.6 |    0.717   |    0.717    |   0.000
     clientsB[2] |  3   |-159.6 |    0.988   |    0.988    |   0.000
     clientsB[3] |  3   |  33.9 |    0.180   |    0.180    |   0.000
-    clientsC[0] |  3   | 175.6 |    1.001   |    1.001    |   0.000
-    clientsC[1] |  3   |  50.4 |    0.268   |    0.268    |   0.000
-    clientsC[2] |  3   | 128.8 |    0.762   |    0.762    |   0.000
+    clientsC[0] |  3   | 175.6 |    1.002   |    1.002    |   0.000
+    clientsC[1] |  3   |  50.4 |    0.269   |    0.269    |   0.000
+    clientsC[2] |  3   | 128.8 |    0.764   |    0.764    |   0.000
     clientsC[3] |  3   |  23.7 |    0.126   |    0.126    |   0.000
 ```
 
@@ -204,7 +212,7 @@ was sub-ns.
 
 ```
   [PASS] baseline (no bursts): every node converges (|final| < 2 us)
-  [PASS] bursts genuinely aligned by gPTP sync (mean spread 1.153 us < 50 us)
+  [PASS] bursts genuinely aligned by gPTP sync (mean spread 0.579 us < 50 us)
   [PASS] congestion is real: aligned microbursts overflow the finite queue
 ```
 
@@ -221,8 +229,11 @@ result is reported as data, per `feedback.ini`'s own standard.
   degraded — a faithful reproduction of INET's M4 non-finding, with the M3
   localization mechanism confirmed present-but-negligible (~77 ns) at `coreClient`.
 - **Does not (deferred / simplified):** perfect `scheduleForAbsoluteTime`
-  re-anchoring (S6), hop-by-hop L2 forwarding (S5), IEEE TLV wire format / pcap.
-  Carries S1–S4 forward unchanged.
+  re-anchoring (S6), hop-by-hop L2 forwarding (S5), **IEEE-TLV-dissectable** pcap
+  (own-format pcap capture IS available — P2c, `--pcapPrefix`, off by default,
+  verify with `ns3/scripts/check_pcap_gptp.py`; the IEEE TLV wire format is
+  Tier 3). Carries S1/S4 forward unchanged; **S2 (2-step framing) closed by P2b**
+  and **S3 (`neighborRateRatio`) closed by P2a** (both negligible on M4 — ≤ 1 ns).
 
 ### Honest licensing note
 

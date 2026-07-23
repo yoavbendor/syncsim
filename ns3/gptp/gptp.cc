@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // syncsim ns-3 migration POC -- Phase 2 (R-GPTP). See gptp.h for the full
-// header: clean-room provenance, the licensing caveat, and the four
-// simplifications (S1 timestamping, S2 1-step variants, S3 rateRatio=1, S4
-// per-port termination instead of a transparent bridge).
+// header: clean-room provenance, the licensing caveat, and the simplifications
+// (S1 timestamping, S2 2-step framing -- CLOSED by P2b, S3 neighborRateRatio -- CLOSED by P2a,
+// S4 per-port termination instead of a transparent bridge).
 
 #include "gptp.h"
 
@@ -104,6 +104,12 @@ GptpEntity::GetLinkDelay(uint32_t portIndex) const
     return m_ports.at(portIndex).linkDelay;
 }
 
+double
+GptpEntity::GetNeighborRateRatio(uint32_t portIndex) const
+{
+    return m_ports.at(portIndex).neighborRateRatio;
+}
+
 void
 GptpEntity::SendFrame(uint32_t portIndex, const GptpHeader& hdr)
 {
@@ -115,15 +121,19 @@ GptpEntity::SendFrame(uint32_t portIndex, const GptpHeader& hdr)
 
 // ---- Peer delay ----------------------------------------------------------
 //
-// Requester (this end) at t1 sends Pdelay_Req. Responder records rx time t2,
-// and at t3 sends Pdelay_Resp carrying (t2, t3) [1-step, S2]. Requester records
-// rx time t4 and computes the mean link delay:
+// Requester (this end) at t1 sends Pdelay_Req. Responder records rx time t2 and
+// sends a Pdelay_Resp carrying t2, then a Pdelay_Resp_Follow_Up carrying its tx
+// time t3 (2-step, S2 closed by P2b). The requester records its rx time t4 of the
+// Resp and, on the Follow_Up, computes the mean link delay:
 //
 //     meanLinkDelay = ((t4 - t1) - (t3 - t2)) / 2
 //
-// t1,t4 are on the requester's local clock; t2,t3 on the responder's. Treating
-// both ends as equal-rate (S3, neighborRateRatio = 1) is fine here because both
-// (t4-t1) and (t3-t2) are few-microsecond durations. Per S1 the timestamps are
+// t1,t4 are on the requester's local clock; t2,t3 on the responder's. S3 is now
+// closed (P2a): neighborRateRatio is derived from consecutive Pdelay exchanges
+// and the responder turnaround (t3-t2) is divided by it to express it in local
+// time (see HandlePdelayRespFollowUp). At these few-microsecond durations the
+// correction is sub-picosecond, so the measured delay is unchanged to 3+ sig figs.
+// Splitting into two frames is informationally identical (S2). Per S1 the timestamps are
 // the send-fires / receive-callback-fires instants, so meanLinkDelay includes
 // one frame serialization time on top of the channel propagation delay -- a
 // real, small, positive, stable value, which is all Gate 2 needs.
@@ -156,33 +166,94 @@ GptpEntity::StartPdelay(Time pdelayInterval)
 void
 GptpEntity::HandlePdelayReq(uint32_t portIndex, const GptpHeader& in)
 {
-    // We are the responder. t2 = local rx time (now), t3 = local tx time of the
-    // response (also now -- 1-step, S2, turnaround folded to ~0 on our clock;
-    // any real turnaround would simply cancel in (t3 - t2)).
+    // We are the responder (2-step, S2 closed). t2 = local rx time (now). Send a
+    // Pdelay_Resp carrying ONLY t2, then capture t3 (the egress instant of that
+    // Resp on our local clock) and send a Pdelay_Resp_Follow_Up carrying t3. Real
+    // 802.1AS splits these so t3 can be a hardware egress timestamp rather than a
+    // value predicted before the frame leaves; here the turnaround (t3 - t2) is
+    // ~0 and cancels in the peer-delay math either way.
     Time t2 = m_clock->GetLocalTime();
     GptpHeader resp;
     resp.SetType(GptpMsgType::PdelayResp);
     resp.SetSeq(in.GetSeq());
-    resp.SetTa(t2);                       // responder rx
-    resp.SetTb(m_clock->GetLocalTime());  // responder tx (t3)
+    resp.SetTa(t2); // responder rx (t2) only
+    Time t3 = m_clock->GetLocalTime(); // egress timestamp of the Pdelay_Resp
     SendFrame(portIndex, resp);
+    GptpHeader fu;
+    fu.SetType(GptpMsgType::PdelayRespFollowUp);
+    fu.SetSeq(in.GetSeq());
+    fu.SetTa(t3); // responder tx (t3)
+    SendFrame(portIndex, fu);
 }
 
 void
 GptpEntity::HandlePdelayResp(uint32_t portIndex, const GptpHeader& in)
 {
+    // Phase 1 of the 2-step exchange (S2 closed): the Pdelay_Resp carries only t2.
+    // Record t4 (our rx of the Resp) and t2, and mark the exchange pending; the
+    // peer-delay math is completed in HandlePdelayRespFollowUp when t3 arrives.
     Port& p = m_ports[portIndex];
     if (in.GetSeq() != p.pdelaySeq)
     {
         return; // stale / mismatched response
     }
-    Time t4 = m_clock->GetLocalTime();
+    p.pdelayT4 = m_clock->GetLocalTime(); // t4 = rx of the Pdelay_Resp
+    p.pdelayT2 = in.GetTa();              // t2 (responder rx)
+    p.pdelayRespSeen = true;
+}
+
+void
+GptpEntity::HandlePdelayRespFollowUp(uint32_t portIndex, const GptpHeader& in)
+{
+    // Phase 2 of the 2-step exchange: the Pdelay_Resp_Follow_Up carries t3. It
+    // must match the seq of a Pdelay_Resp we already saw for this port.
+    Port& p = m_ports[portIndex];
+    if (in.GetSeq() != p.pdelaySeq || !p.pdelayRespSeen)
+    {
+        return; // stale, or Follow_Up without its Resp (e.g. Resp was dropped)
+    }
+    p.pdelayRespSeen = false;
+    Time t4 = p.pdelayT4;
     Time t1 = p.pdelayT1;
-    Time t2 = in.GetTa();
-    Time t3 = in.GetTb();
-    // meanLinkDelay = ((t4 - t1) - (t3 - t2)) / 2
-    Time rt = (t4 - t1) - (t3 - t2);
-    Time cand = rt / 2;
+    Time t2 = p.pdelayT2;
+    Time t3 = in.GetTa();
+
+    // neighborRateRatio (S3, closed by P2a). Between two successive Pdelay
+    // exchanges, compare how far the NEIGHBOR's clock advanced (its reported tx
+    // timestamp t3) against how far OUR clock advanced (our rx timestamp t4):
+    //   neighborRateRatio = (t3_now - t3_prev) / (t4_now - t4_prev)
+    // i.e. neighbor-elapsed / local-elapsed = neighbor rate relative to ours. A
+    // guard rejects physically-implausible ratios (>1% off unity), which also
+    // rejects a t4 inflated by the M3 shared-medium contention artifact (that
+    // balloons local-elapsed and drags the ratio far from 1) -- the same class of
+    // outlier the running-minimum peer-delay filter below rejects.
+    if (p.haveRrPrev)
+    {
+        double localElapsed = (t4 - p.rrPrevT4).GetSeconds();
+        double neighElapsed = (t3 - p.rrPrevT3).GetSeconds();
+        if (localElapsed > 0.0 && neighElapsed > 0.0)
+        {
+            double rr = neighElapsed / localElapsed;
+            if (rr > 0.99 && rr < 1.01)
+            {
+                p.neighborRateRatio = rr;
+            }
+        }
+    }
+    p.rrPrevT3 = t3;
+    p.rrPrevT4 = t4;
+    p.haveRrPrev = true;
+
+    // meanLinkDelay = ((t4 - t1) - (t3 - t2)/neighborRateRatio) / 2.
+    // The responder turnaround (t3 - t2) is measured on the NEIGHBOR's clock, so
+    // divide by neighborRateRatio to express it in our local time base before
+    // subtracting it from the local round trip (t4 - t1). With S3 closed this is
+    // the rate-consistent peer delay; at these drift/timescales the correction is
+    // sub-picosecond (P2a: no observed number moved), and the responder turnaround
+    // (t3 - t2) is ~0 anyway, so the fold is exact and vanishingly small here.
+    double rttLocal = (t4 - t1).GetSeconds();
+    double turnaround = (t3 - t2).GetSeconds() / p.neighborRateRatio;
+    Time cand = ns3::Seconds((rttLocal - turnaround) / 2.0);
 
     // Peer-delay OUTLIER FILTER (P1a). The true link delay is a physical FLOOR
     // (propagation + one serialization, S1) and static for a given link;
@@ -223,12 +294,21 @@ GptpEntity::SendSync(Time syncInterval)
         {
             continue;
         }
+        // 2-step (S2 closed): a bare Sync marker, immediately followed by a
+        // Follow_Up carrying the preciseOriginTimestamp (captured at Sync egress)
+        // and correctionField = 0 at the source. The slave's syncRxLocal is the
+        // bare Sync's arrival instant; the Follow_Up only supplies the numbers.
         GptpHeader sync;
         sync.SetType(GptpMsgType::Sync);
         sync.SetSeq(seq);
-        sync.SetTa(m_clock->GetLocalTime()); // preciseOriginTimestamp
-        sync.SetTb(Time(0));                 // correctionField = 0 at the source
+        Time originTs = m_clock->GetLocalTime(); // preciseOriginTimestamp at Sync egress
         SendFrame(i, sync);
+        GptpHeader fu;
+        fu.SetType(GptpMsgType::FollowUp);
+        fu.SetSeq(seq);
+        fu.SetTa(originTs);  // preciseOriginTimestamp
+        fu.SetTb(Time(0));   // correctionField = 0 at the source
+        SendFrame(i, fu);
     }
     ns3::Simulator::Schedule(syncInterval, &GptpEntity::SendSync, this, syncInterval);
 }
@@ -236,17 +316,38 @@ GptpEntity::SendSync(Time syncInterval)
 void
 GptpEntity::HandleSync(uint32_t portIndex, const GptpHeader& in)
 {
-    // Sync must arrive on our slave port to be meaningful.
+    // 2-step (S2 closed): the Sync is a bare marker. It must arrive on our slave
+    // port to be meaningful. Record its arrival instant (syncRxLocal) and seq,
+    // and mark a Sync pending; the offset math + servo + relay all happen in
+    // HandleFollowUp when the matching Follow_Up arrives. A new Sync before its
+    // Follow_Up simply overwrites the pending slot -- so if a Follow_Up is lost,
+    // the next Sync cleanly supersedes it (that cycle is just skipped).
     if (static_cast<int>(portIndex) != m_slavePort)
     {
         return;
     }
-    Time recvLocal = m_clock->GetLocalTime();          // local time at receipt
-    Time originTs = in.GetTa();                         // GM's precise origin ts
-    Time upstreamCorr = in.GetTb();                     // accumulated correction
-    Time d = m_ports[portIndex].linkDelay;              // our measured peer delay
+    m_syncRxLocal = m_clock->GetLocalTime(); // local time at Sync receipt
+    m_syncPendingSeq = in.GetSeq();
+    m_syncPending = true;
+}
 
-    // Reconstructed "GM time right now" at the instant this Sync reached us:
+void
+GptpEntity::HandleFollowUp(uint32_t portIndex, const GptpHeader& in)
+{
+    // 2-step (S2 closed): the Follow_Up carries the numbers the bare Sync did not.
+    // It must arrive on the slave port and match the pending Sync's seq.
+    if (static_cast<int>(portIndex) != m_slavePort || !m_syncPending ||
+        in.GetSeq() != m_syncPendingSeq)
+    {
+        return;
+    }
+    m_syncPending = false;
+    Time recvLocal = m_syncRxLocal;        // the bare Sync's arrival (NOT the Follow_Up's)
+    Time originTs = in.GetTa();            // GM's precise origin ts
+    Time upstreamCorr = in.GetTb();        // accumulated correction
+    Time d = m_ports[portIndex].linkDelay; // our measured peer delay
+
+    // Reconstructed "GM time right now" at the instant the Sync reached us:
     //   gmTime = originTimestamp + correctionField + thisLinkPeerDelay
     Time gmTime = originTs + upstreamCorr + d;
     double offsetSec = (recvLocal - gmTime).GetSeconds(); // local - GM = offset-from-GM
@@ -266,6 +367,9 @@ GptpEntity::HandleSync(uint32_t portIndex, const GptpHeader& in)
     // of our absolute clock offset -- it forwards only durations (peer delay +
     // residence) + the GM's origin timestamp, so downstream reconstruction does
     // not depend on how well *we* are synced (proven in gptp-spike.cc's notes).
+    // Residence is measured from the bare Sync's arrival (recvLocal), so it
+    // naturally absorbs the small Sync->Follow_Up gap; the correction-field math
+    // self-compensates, leaving downstream offsets unchanged vs the 1-step form.
     ns3::Simulator::Schedule(ns3::MicroSeconds(kResidenceDelayUs),
                              &GptpEntity::RelayDownstream,
                              this,
@@ -286,8 +390,18 @@ GptpEntity::RelayDownstream(Time originTs,
     Time sendLocal = m_clock->GetLocalTime();
     Time residence = sendLocal - slaveRecvLocal; // local elapsed since Sync receipt
     // correctionField accumulates: upstream correction + this link's peer delay
-    // + our residence time. (S3: residence taken on our local clock, rateRatio=1.)
-    Time newCorr = upstreamCorrection + slaveLinkDelay + residence;
+    // + our residence time. (S3 closed by P2a: the residence is measured on OUR
+    // local clock, so scale it by the slave port's neighborRateRatio -- our
+    // upstream neighbor's rate relative to ours, the best available proxy for the
+    // rate toward GM -- to express it in the upstream/GM time base before folding
+    // it in. At these timescales this is a sub-picosecond adjustment.)
+    double rr = (m_slavePort >= 0) ? m_ports[m_slavePort].neighborRateRatio : 1.0;
+    Time residenceCorrected = ns3::Seconds(residence.GetSeconds() * rr);
+    Time newCorr = upstreamCorrection + slaveLinkDelay + residenceCorrected;
+    // 2-step (S2 closed): regenerate a bare Sync + a Follow_Up carrying the
+    // GM origin timestamp and the accumulated correction on every master port.
+    // Both share a fresh seq so downstream slaves can pair them.
+    uint16_t relaySeq = ++m_syncSeq;
     for (uint32_t i = 0; i < m_ports.size(); ++i)
     {
         if (!m_ports[i].isMaster)
@@ -296,10 +410,14 @@ GptpEntity::RelayDownstream(Time originTs,
         }
         GptpHeader sync;
         sync.SetType(GptpMsgType::Sync);
-        sync.SetSeq(m_syncSeq); // seq is cosmetic downstream; keep monotone-ish
-        sync.SetTa(originTs);
-        sync.SetTb(newCorr);
+        sync.SetSeq(relaySeq);
         SendFrame(i, sync);
+        GptpHeader fu;
+        fu.SetType(GptpMsgType::FollowUp);
+        fu.SetSeq(relaySeq);
+        fu.SetTa(originTs);
+        fu.SetTb(newCorr);
+        SendFrame(i, fu);
     }
     // Now servo our own clock (bridge is a slave toward the GM too).
     m_offsetTrace(ns3::Simulator::Now(), offsetSecForServo);
@@ -390,8 +508,14 @@ GptpEntity::OnDeviceReceive(uint32_t portIndex, ns3::Ptr<const ns3::Packet> pack
     case GptpMsgType::PdelayResp:
         HandlePdelayResp(portIndex, hdr);
         break;
+    case GptpMsgType::PdelayRespFollowUp:
+        HandlePdelayRespFollowUp(portIndex, hdr);
+        break;
     case GptpMsgType::Sync:
         HandleSync(portIndex, hdr);
+        break;
+    case GptpMsgType::FollowUp:
+        HandleFollowUp(portIndex, hdr);
         break;
     }
     return true;

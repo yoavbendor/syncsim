@@ -48,18 +48,21 @@ Topology — identical shape to `simulations/minimal.ned` and Phase 0's
   sw.port2 <-> client2 : MASTER      (sw is slave AND master, like a real bridge)
 ```
 
-1. **Peer delay** (per link, 1-step): each slave port sends `Pdelay_Req` at t1;
-   the responder returns a `Pdelay_Resp` carrying its rx (t2) and tx (t3)
-   timestamps; the requester computes
+1. **Peer delay** (per link, 2-step as of P2b): each slave port sends
+   `Pdelay_Req` at t1; the responder returns a `Pdelay_Resp` carrying its rx (t2),
+   then a `Pdelay_Resp_Follow_Up` carrying its tx (t3); the requester (holding
+   pending state between the two) computes
    `meanLinkDelay = ((t4 − t1) − (t3 − t2)) / 2`. Timestamps are read from the
    node's local `syncsim::Clock`.
-2. **Sync + residence-time correction**: `gm` (drift-free, so its local time is
-   global sim time) sends `Sync` carrying `preciseOriginTimestamp` and
-   `correctionField = 0`. `sw` receives it on its slave port, reconstructs GM
-   time as `origin + correction + peerDelay`, servos its own clock, and after a
-   residence delay **regenerates** `Sync` on both master ports with
-   `correctionField = upstreamCorrection + gm↔sw peerDelay + residenceTime`. Each
-   client reconstructs `origin + correction + sw↔client peerDelay` and servos.
+2. **Sync + residence-time correction** (2-step as of P2b): `gm` (drift-free, so
+   its local time is global sim time) sends a bare `Sync` marker followed by a
+   `Follow_Up` carrying `preciseOriginTimestamp` and `correctionField = 0`. `sw`
+   records the bare `Sync`'s arrival, and on the `Follow_Up` reconstructs GM time
+   as `origin + correction + peerDelay`, servos its own clock, and after a
+   residence delay **regenerates** a bare `Sync` + `Follow_Up` on both master
+   ports with `correctionField = upstreamCorrection + gm↔sw peerDelay +
+   residenceTime`. Each client reconstructs `origin + correction + sw↔client
+   peerDelay` and servos.
 3. **Servo (hardened, P1a)**: on every `Sync`, `offset = localTime −
    reconstructedGmTime` drives a **PI control loop** — a damped **proportional
    phase** term (`Clock::AdjustOffset`, gain 0.7) plus a **bounded, low-pass
@@ -95,13 +98,20 @@ like an unresolvable slave/master ordering problem dissolves.
   receive callback fires at end-of-reception, so a measured link delay folds in
   one frame serialization time on top of channel propagation — real, positive,
   stable, which is all Gate 2 asks.
-- **S2 — 1-step variants.** `Pdelay_Resp` carries (t2, t3) directly (vs 2-step
-  `Pdelay_Resp` + `Pdelay_Resp_Follow_Up`); `Sync` carries origin + correction
-  directly (vs `Sync` + `Follow_Up`). Same information, fewer frames.
-- **S3 — neighborRateRatio = 1.** Peer delay and residence are treated as
-  equal-rate durations; over a few microseconds the residual rate error is
-  sub-picosecond. Real 802.1AS carries the rate ratio for ptp4l-grade precision;
-  a first spike does not need it.
+- **S2 — 2-step framing — CLOSED (P2b).** Formerly 1-step. Now split into the
+  real two-message form: `Pdelay_Resp` (t2 only) + `Pdelay_Resp_Follow_Up` (t3),
+  and a bare `Sync` marker + `Follow_Up` (preciseOriginTimestamp + correction).
+  Requester/slave hold pending state between each pair. Verified informationally
+  identical to 1-step in lossless conditions (Gate 2/M2/M4 match to ≤ 1 ns); the
+  one honest exception is M3's heavy-loss regime — see `congestion/README.md`.
+- **S3 — neighborRateRatio — CLOSED (P2a).** Formerly assumed = 1. Now derived
+  per link from two successive Pdelay exchanges (`neighborRateRatio =
+  (t3_now − t3_prev) / (t4_now − t4_prev)` — neighbor-elapsed / local-elapsed)
+  and folded into the peer-delay turnaround and the bridge residence-time
+  correction. As S3 always predicted, no observed number moved to 3+ sig figs;
+  post-servo-lock the measured ratio is ~1 (< 0.5 ppb residual, printed in the
+  gate output) because the servo steers the local clock's *rate* to GM. See the
+  P2a note below.
 - **S4 — per-port termination, no `BridgeNetDevice`.** Real gPTP frames use a
   link-local reserved multicast that bridges do not forward; each port is a gPTP
   endpoint and the bridge regenerates Sync. So (unlike Phase 0) no transparent L2
@@ -111,7 +121,20 @@ like an unresolvable slave/master ordering problem dissolves.
 Message wire format is a pragmatic 19-byte custom `ns3::Header` (type + seq + two
 int64 femtosecond fields); no IEEE TLV fidelity or pcap for this scenario (Gate 2
 gates on convergence, not wire format — unlike Phase 0/real syncsim, which do
-care about pcap).
+care about pcap). **Two frames per Pdelay exchange and per Sync cycle as of P2b
+(2-step)** — the header is unchanged, only the message count grew.
+
+**2-step framing note (P2b — S2 closed).** Splitting `Pdelay_Resp` into
+`Pdelay_Resp` (t2) + `Pdelay_Resp_Follow_Up` (t3), and `Sync` into a bare marker
++ `Follow_Up` (origin + correction), left the Gate-2 numbers informationally
+identical: peaks moved ≤ 1 ns (`client2 57.177 → 57.178 µs`), every final is
+`0.000 µs`, and servo counts are unchanged at 159. (The downsampled trajectory
+table now prints slightly later global sample instants — the offset trace fires
+at `Follow_Up` receipt rather than `Sync` receipt — but the underlying
+convergence is bit-identical, all `0.0000` from ~2 s on.) This empirically
+confirms S2's "informationally identical" claim for the lossless case; the one
+regime where 2-step genuinely differs is M3's heavy-loss queue
+(`congestion/README.md`).
 
 ## Gate 2 result — **PASSED** (sandbox, ns-3.45, release build, asserts on)
 
@@ -184,6 +207,18 @@ hardening exists to fix M3's congested-peak magnitude (see `congestion/README.md
 shift is that fix's only visible footprint here, and it is a strict wash on the
 gated properties.
 
+**neighborRateRatio note (P2a — S3 closed).** The gate output now prints the
+per-link measured `neighborRateRatio` as a residual deviation from 1.0 in ppb.
+Post-lock all three links read `1 + 0.000 ppb` (residual < 0.5 ppb): the servo
+steers each local clock's *rate* to match GM, so once locked the neighbour and
+local clocks genuinely tick at the same rate and the measured ratio is ~1. Folding
+this into the peer-delay turnaround and residence-time math therefore leaves the
+Gate-2 numbers unchanged to 3+ sig figs — one downsampled trajectory sample moved
+by 1 ns (`client2 −54.652 → −54.653 µs` at t = 0.375 s, a pre-lock transient
+point), and the peer delay `sw↔client2` reads `6.618` vs `6.617 µs`; nothing else
+moved. This is exactly S3's long-standing prediction (sub-ps at these
+drift/timescales), now empirically confirmed rather than asserted.
+
 ### What this does and does not establish
 
 - **Does:** ns-3 *can* host a minimal but real, closed-loop 802.1AS mechanism —
@@ -192,8 +227,9 @@ gated properties.
   deterministically. R-GPTP is not a blocker. Gates 1 + 2 both hold → the POC's
   core "migration is viable" question is answered *yes* on the pinned ns-3.45.
 - **Does not (deferred to later phases):** no multi-hop residence bridges (M2 /
-  R-BRIDGE), no data-plane congestion coupling (M3/M4), no neighborRateRatio
-  (S3), no streaming-PHY-grade timestamps (S1), no IEEE TLV wire format / pcap.
+  R-BRIDGE), no data-plane congestion coupling (M3/M4), no
+  streaming-PHY-grade timestamps (S1), no IEEE TLV wire format / pcap.
+  (**S3 `neighborRateRatio` is now closed — P2a**, see the note above.)
   The servo is a hardened PI loop (damped proportional phase + bounded low-pass
   integral frequency + missed-Sync skip + a peer-delay outlier filter on its
   input), not a full adaptive ptp4l PI2 with spike-rejection state machine.

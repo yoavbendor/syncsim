@@ -42,19 +42,19 @@ treatment:
 | ID | Item | Kind | Root cause | Changes result *shape*, or just precision? | Tier |
 |---|---|---|---|---|---|
 | S1 | Coarser timestamps (send-scheduled/receive-callback vs. INET's streaming-PHY SFD signals) | Precision-only | ns-3 has no native SFD hook; `PhyTxBegin`/`PhyRxBegin` traces exist but aren't used yet | Precision only — delay is real, positive, stable | 2 |
-| S2 | 1-step Pdelay/Sync (no `Pdelay_Resp_Follow_Up`/`Follow_Up`) | Precision-only | Simplicity; informationally identical to 2-step | Neither | 2 |
-| S3 | `neighborRateRatio = 1` | Precision-only | Not implemented | Precision only — provably sub-picosecond at these timescales | 2 |
+| S2 | 1-step Pdelay/Sync — ✅ **DONE (P2b)**: real 2-step (`Pdelay_Resp`+`Pdelay_Resp_Follow_Up`, `Sync`+`Follow_Up`) | Precision-only* | ~~Simplicity~~ implemented P2b | *Informationally identical where loss is negligible (Gate2/M2/M4 ≤1 ns); under M3's heavy loss the extra frame/cycle really does move the peak (510→429 µs) + servo count (170→90), a faithful 2-step loss property, isolation shape intact | 2 |
+| S3 | `neighborRateRatio = 1` — ✅ **DONE (P2a)**: now derived per link, folded into peer-delay + residence math | Precision-only | ~~Not implemented~~ implemented P2a | Precision only — confirmed empirically (≤ 2 ns transient effect, steady state unchanged) | 2 |
 | S4 | Per-port gPTP termination, no transparent bridging | *Not a gap* | Deliberate — real 802.1AS gPTP uses a non-forwarded reserved multicast | N/A — arguably more correct than a transparent bridge | — |
 | **S5** | **Background congestion traffic injected at the bottleneck egress, not truly forwarded hop-by-hop** | **Shape-level, real root cause** | **Mainline ns-3's `CsmaChannel` is half-duplex shared-medium; a real forwarding attempt spuriously coupled every node's sync (confirmed empirically)** | **Shape — a real topological difference from INET** | 3 |
 | S6 | Approximate clock-driven burst scheduling (recomputed per-burst, not true mid-flight re-anchoring) | Precision-only | ns-3 has no `scheduleForAbsoluteTime` primitive | Precision only — still genuinely clock-driven | 2 |
 | — | **M3 servo lock-loss transient**: congested peak 24× larger than INET's — ✅ **FIXED (P1a): 46,281 µs → 510 µs** | **Real, undamped anomaly** | Phase 2's deadbeat-phase + naive-integral-frequency servo overreacting to a wild rate estimate after a sporadically missed Sync — **plus** (found during the fix) a peer-delay `d` corrupted to tens of ms by Pdelay contention on the saturated shared CSMA medium, the dominant driver | **Magnitude — the one number this undermined trust in** | **1** |
 | — | `queueLength:vector` not exported — ✅ **DONE (P1b)** | Missing capability, cheap | Never wired up in Phase 4; now sampled per switch-egress queue + exported to `vectors.csv` | Was blocking Pages backlog/coupling plots for ns-3 (already-scaffolded code, missing data) — now render non-empty | **1** |
-| — | No pcap capture/replay past Phase 0's smoke test | Missing capability, moderate | Not built | Debuggability gap; own-format capture/replay is cheap, IEEE-dissectable capture is not (see Tier 3) | 2 |
+| — | No pcap capture/replay past Phase 0's smoke test — ✅ **DONE (P2c)**: `--pcapPrefix` on all three scenarios + `check_pcap_gptp.py` verifier | Missing capability, moderate | ~~Not built~~ built P2c (own-format, off by default) | Debuggability gap closed; IEEE-dissectable capture still Tier 3 | 2 |
 | — | No YAML-topology-DSL equivalent (Phase B) | Missing capability, large | Not built | Every ns-3 topology is hand-coded C++, not data-driven | 3 |
 | — | No GUI/interactive tooling (Qtenv/IDE equivalent) | Missing capability, large | Not built; ns-3's own tools (NetAnim/PyViz) are a different paradigm, not a clean port target | Developer-experience gap, not a fidelity gap | 3 |
 | — | Real IEEE TLV wire format for gPTP messages | Missing capability, large | Pragmatic 19-byte custom header used throughout | Needed for genuinely Wireshark-dissectable captures — pcap alone (above) doesn't get you this | 3 |
 | — | Single topology fully proven (Nominal/Minimal shape only) | Missing capability | No generator/DSL to vary topology cheaply | Same root cause as the YAML-DSL gap | 3 |
-| — | Shorter sim-time (20–30s ns-3 runs vs. OMNeT++'s 60s) | Minor | Convenience during development | Low severity — gPTP dynamics settle fast; worth normalizing, not worth its own phase | 2 (folded into P2 verification) |
+| — | Shorter sim-time (20–30s ns-3 runs vs. OMNeT++'s 60s) — ✅ **DONE (P2d)**: default now 60s | Minor | ~~Convenience~~ normalized P2d | Low severity; peaks unchanged, time-scaled counts ~2× | 2 (folded into P2c commit) |
 | — | M6 (real `ptp4l` cross-check) | Shared gap | Never built on *either* track | Not ns-3 falling behind — a future capability for the whole project | 4 (out of scope here) |
 | — | Priority shaping (Qbv/Qav) | Shared gap | Deferred on the OMNeT++ side too (M3's original scope) | Same — not ns-3-specific | 4 (out of scope here) |
 
@@ -176,56 +176,129 @@ Real improvements toward matching real 802.1AS behavior, each individually
 cheap enough to time-box, none expected to change any *observed number* (S1,
 S3, S6 are all already proven precision-only, not shape-level).
 
-### P2a — `neighborRateRatio` computation (closes S3)
+### P2a — `neighborRateRatio` computation (closes S3) — ✅ **DONE**
 
-Real 802.1AS derives the rate ratio from consecutive Pdelay measurement
-intervals at both link ends and folds it into the peer-delay/residence-time
-correction instead of assuming both ends tick at the same rate. **Honest
-framing, stated up front rather than discovered after the work**: S3's own
-existing documentation already establishes the omitted term is sub-picosecond
-at this project's drift magnitudes and measurement durations — this item's
-value is protocol completeness, not an expected change to any result. Cheap
-to implement (the math is well-understood); do it, but don't expect it to
-move a single number.
+**Status (done):** `neighborRateRatio` is now derived per link in
+`GptpEntity`'s peer-delay handling from two successive Pdelay exchanges
+(`neighborRateRatio = (t3_now − t3_prev) / (t4_now − t4_prev)` = neighbor-elapsed
+/ local-elapsed) and folded into **both** the peer-delay turnaround (`(t3−t2)`,
+measured on the neighbor's clock, divided by the ratio to reach local time) and
+the bridge residence-time correction (residence scaled by the slave port's
+ratio). A `>1%`-off-unity guard rejects a `t4` inflated by the M3 shared-medium
+artifact — the same outlier class P1a's running-minimum peer-delay filter
+rejects. Re-vendored byte-identical across all four scenario dirs; `gptp-spike`
+now prints the measured ratio (as a ppb residual).
 
-### P2b — Real 2-step Pdelay/Sync framing (closes S2)
+**Result — matches S3's long-standing prediction, essentially unchanged:** the
+term is real and live, but post-servo-lock the measured ratio converges to ~1
+(residual **< 0.5 ppb**) because the servo steers each local clock's *rate* to
+GM — so folding it in only bites during the brief pre-lock transient. Net
+observed effect, honestly reported (not forced to zero):
 
-Split `Pdelay_Resp`/`Sync` into their real two-message form
-(`Pdelay_Resp`+`Pdelay_Resp_Follow_Up`, `Sync`+`Follow_Up`), tracking pending
-state between the two messages in `GptpEntity`. More implementation surface
-than P2a (new message types, split handler state machines, more failure
-modes to reason about), and — like S2's own documentation already states —
-**informationally identical** to the 1-step version. Its real value is
-**synergy with P2c**: real hardware/`ptp4l` captures are always 2-step, so if
-the goal of adding pcap capture is ever "compare against a real capture,"
-1-step framing defeats that comparison regardless of anything else done.
+- **Gate 2 (gptp-spike):** all PASS; one downsampled trajectory sample moved 1 ns
+  (`client2 −54.652 → −54.653 µs`), peer delay `sw↔client2 6.617 → 6.618 µs`;
+  peaks/finals/servos otherwise identical.
+- **M2 (nominal):** all PASS; a few transient peaks shifted ≤ 1 ns (last digit,
+  e.g. `coreClient 24.075 → 24.076 µs`); every final `0.000 µs`.
+- **M3 (congestion):** all PASS, **isolation shape exact** (16/17 nodes ratio
+  1.0x); `coreClient` congested peak `510.471 → 510.473 µs` (+2 ns, still 21.2x),
+  drop rate / backlog unchanged.
+- **M4 (feedback):** all PASS; `coreClient` steady-window delta `0.695 → 0.694 µs`
+  (still the sole non-zero node, still > 0.5 µs tol → "COUPLING OBSERVED"
+  unchanged); all 16 others exactly 0.000.
 
-**Gate:** re-run every gPTP-dependent scenario; final/peak offsets and servo
-correction counts match the 1-step version's results (empirically
-demonstrating the "informationally identical" claim, not just asserting it
-from the design).
+All four scenarios deterministic (run-to-run byte-identical, twice each). The
+≤ 2 ns shifts are the residence-time rateRatio fold acting during the pre-lock
+transient; steady state is untouched, confirming S3 was precision-only.
 
-### P2c — pcap capture on the gPTP + data path
+**Original plan (for reference):** Real 802.1AS derives the rate ratio from
+consecutive Pdelay measurement intervals at both link ends and folds it into the
+peer-delay/residence-time correction instead of assuming both ends tick at the
+same rate. S3's own documentation already established the omitted term is
+sub-picosecond at this project's drift magnitudes — protocol completeness, not an
+expected change to any result. Confirmed empirically above.
 
-Reuses Phase 0's already-proven mechanism (`csma.EnablePcapAll()`) on
-`nominal`/`congestion`/`feedback`, closing the debuggability gap those
-scenarios have had since Phase 2. **Scope discipline, stated clearly**: this
-gets you capture + a round-trip-verifiable replay in this project's own
-19-byte custom header format (mirroring the rigor of syncsim's existing C1
-pcap milestone, adapted) — **not** Wireshark-dissectable real-802.1AS
-captures. That requires the IEEE TLV wire format too (Tier 3). Don't let
-"pcap capture" quietly imply more than it delivers.
+### P2b — Real 2-step Pdelay/Sync framing (closes S2) — ✅ **DONE**
 
-**Gate:** captures are non-empty and content-verifiable via a small parser for
-this project's own header format (mirroring `scripts/check_pcap_replay.py`'s
-role); replay round-trips.
+**Status (done):** `Pdelay_Resp`/`Sync` are split into their real two-message
+form — `Pdelay_Resp` (t2 only) + `Pdelay_Resp_Follow_Up` (t3), and a bare `Sync`
+marker + `Follow_Up` (preciseOriginTimestamp + correctionField). New
+`GptpMsgType` entries (`PdelayRespFollowUp=3`, `FollowUp=4`); the requester holds
+per-port pending state (t2, t4) between Resp and its Follow_Up, and the slave
+holds pending state (syncRxLocal, seq) between the bare Sync and its Follow_Up.
+Re-vendored byte-identical across all four scenario dirs; `gptp.h`'s S2 header
+block updated to closed.
 
-### P2d — Normalize sim-time to 60s
+**Result — verified empirically, NOT just asserted (this is exactly what the
+gate asked for):** informationally identical in the lossless / light-loss
+scenarios, with one honest, well-understood exception under heavy loss:
 
-Low-severity, low-effort: bring ns-3 scenario durations in line with
-OMNeT++'s standard 60s `sim-time-limit`, removing a needless axis of
-difference when comparing results side by side. Folded into this tier's
-verification pass rather than its own phase.
+- **Gate 2 (gptp-spike):** all PASS. Peaks ≤ 1 ns (`client2 57.177 → 57.178 µs`),
+  finals `0.000`, servo counts identical (159). Trajectory-table *row selection*
+  shifts (the offset trace fires at `Follow_Up` receipt, not `Sync` receipt) but
+  the underlying convergence is bit-identical.
+- **M2 (nominal):** all PASS. Only hop-3 leaf peaks shifted ≤ 1 ns (the extra
+  frame/cycle); finals `0.000`, servo counts 239, gate unchanged.
+- **M4 (feedback):** all PASS. `coreClient` delta `0.695 µs` (= the P1a value to
+  3 sig figs), still the sole non-zero node, "COUPLING OBSERVED" unchanged.
+- **M3 (congestion) — the honest exception:** all PASS and **isolation shape
+  EXACT** (16/17 nodes ratio 1.0x), but the headline numbers *do* move:
+  `coreClient` congested peak **510.473 → 429.207 µs** (21.2x → 17.8x) and servo
+  count **170 → 90**. This is **not** informational identity — and it is **not a
+  bug**. It is a real property of 2-step: each cycle now needs BOTH the bare Sync
+  and its Follow_Up to survive the ~33%-drop bottleneck queue, so surviving
+  corrections roughly halve, and because the worst-delayed Syncs are the ones
+  most likely to lose their partner Follow_Up, the *surviving* peak is lower. Real
+  `ptp4l`/hardware 2-step behaves exactly this way under loss; the 1-step form was
+  simply more loss-robust by carrying everything in one frame. The M3 *finding*
+  (only the shared-queue node degrades), the drop/backlog regime, and the gate are
+  all unchanged. Reported as data, per the project standard, not forced back.
+
+All four scenarios deterministic (run-to-run byte-identical, twice each); the
+CSV-export/`analyze.py --strict` path still passes on the P2b build. So S2's
+"informationally identical" claim holds wherever loss is negligible, and P2b
+additionally surfaced *where* it does not — a result only visible by verifying
+empirically, exactly as the plan required.
+
+### P2c — pcap capture on the gPTP + data path — ✅ **DONE**
+
+**Status (done):** `nominal`/`congestion`/`feedback-topology.cc` each take a new
+`--pcapPrefix=<prefix>` arg that enables `CsmaHelper::EnablePcapAll` on every CSMA
+device (Phase 0's proven mechanism), writing one `<prefix>-<node>-<dev>.pcap` per
+device — gPTP frames plus, on congestion/feedback's bottleneck, the background
+data (congested/bursts pass only). **Opt-in and off by default**: with no
+`--pcapPrefix` no files are written and stdout / every gate is byte-for-byte
+unchanged (verified — capture only attaches trace sinks; the printed numbers are
+bit-identical with and without it). `ns3/scripts/check_pcap_gptp.py` (new,
+dependency-free, no scapy) is the content verifier — it parses each classic-pcap
+frame, tallies gPTP frames by `GptpMsgType` off the `0x88b6` ethertype, and
+asserts real parseable gPTP traffic **with the 2-step message types present** (a
+1-step capture could not contain `Pdelay_Resp_Follow_Up`/`Follow_Up`). Mirrors
+`scripts/check_pcap_replay.py`'s role. **Scope, as promised:** round-trip-
+verifiable in this project's own 19-byte `GptpHeader` format, **not**
+Wireshark-dissectable 802.1AS (IEEE TLV = Tier 3).
+
+**Verification result:** nominal's gm↔swCore capture reads all five message types
+with matched pairs (Pdelay_Req 20 / Pdelay_Resp 20 / …Follow_Up 20; Sync 7 /
+Follow_Up 7); the congestion bottleneck link reads 12 758 total frames, 118 gPTP,
+and — a bonus, honest confirmation of P2b — shows **more `Pdelay_Resp`/`Sync` than
+their paired `…Follow_Up`s** (31 vs 24, 13 vs 10): the partner frames the
+congested queue dropped, exactly the loss statistic that halves `coreClient`'s
+servo cycles. Both captures PASS the verifier (exit 0).
+
+### P2d — Normalize sim-time to 60s — ✅ **DONE**
+
+**Status (done):** the default `simTime` in `nominal`/`congestion`/`feedback-`
+`topology.cc` is now **60 s** (was 30 s), matching OMNeT++'s `sim-time-limit =
+60s`, still overridable via the existing `--simTime` arg. Bundled into the P2c
+commit per the plan. Verified: all four gates still PASS, all runs deterministic
+(twice each), `analyze.py --strict --sim-time 60` PASS on all three. **Peaks are
+unchanged** (they are early transients — coreClient nominal 24.076 µs, congested
+429.207 µs, feedback delta 0.695 µs all identical to the 30 s run); only
+time-scaled quantities grew ~2× (servo counts 239→479 baseline, congested 90→153;
+congestion drop total 178 k→363 k at the same 32.7 %; feedback burst cycles
+291→591, mean alignment spread even tighter at 0.579 µs). READMEs/OBSERVABILITY
+updated to the 60 s figures.
 
 ---
 
@@ -300,9 +373,9 @@ part of this plan.
 | P1a servo hardening | 1 wk | Medium — touches vendored `gptp.cc` everywhere, full regression required | **Yes** — the point of this phase |
 | P1b `queueLength:vector` | 2–3 days | Low | No — unblocks existing, already-scaffolded plots |
 | P2a rate-ratio | 2–3 days | Low | No — already proven negligible |
-| P2b 2-step framing | 1 wk | Low–medium (new state machine surface) | No — must prove this empirically |
-| P2c pcap capture | 3–5 days | Low — reuses Phase 0's proven mechanism | No |
-| P2d sim-time normalization | trivial | None | No |
+| P2b 2-step framing | 1 wk | Low–medium (new state machine surface) | **Mostly no, but proven empirically NOT to be free**: identical to ≤1 ns in Gate2/M2/M4; under M3's heavy loss it genuinely shifts the peak (510→429 µs) + servo count (170→90) — a faithful 2-step loss property, isolation intact |
+| P2c pcap capture | 3–5 days | Low — reuses Phase 0's proven mechanism | No — **DONE**, opt-in, gates byte-identical when off |
+| P2d sim-time normalization | trivial | None | No — **DONE**, peaks unchanged (transient), counts ~2× |
 | P3a S5 feasibility spike | 1 wk (spike only) | Unknown until spiked — that's the point | TBD, gated on the spike's own answer |
 | P3b YAML topology | 2–4 wk if pursued | Medium | No |
 | P3c IEEE TLV wire format | 2–4 wk if pursued | Medium | No |
