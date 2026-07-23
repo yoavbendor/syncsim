@@ -55,7 +55,7 @@ cycles vs 0.125 s servo updates and few-ppm residual drift, the residual anchori
 error is sub-microsecond — far finer than the alignment spread we measure. This is
 the honest analog of `scheduleForAbsoluteTime`, not a claim of bit-parity.
 
-**It works: the 12 clients' bursts land within a mean 1.174 µs of each other**
+**It works: the 12 clients' bursts land within a mean 0.579 µs of each other**
 (see below) — driven purely by how well gPTP synced their clocks, exactly the
 emergent alignment M4 is about.
 
@@ -107,15 +107,15 @@ Builds as target **`feedback-topology`** →
 
 `feedback-topology` exits `0`. **Deterministic**: byte-identical stdout across two
 runs (`md5sum` matched). The only RNG use is the 12 seeded client drift draws
-(bursts are clock-driven, not random). 30 s run, bursts from local 1.0 s every
+(bursts are clock-driven, not random). 60 s run (P2d: was 30 s), bursts from local 1.0 s every
 100 ms, 15 frags/burst, Sync 0.125 s. Runs **twice in one process** — baseline (no
 bursts) vs bursts.
 
 ### Burst alignment (the emergent quantity — S6 working)
 
 ```
-  full cycles measured : 291
-  mean fire-time spread: 1.174 us   (12 clients agree on "now" to ~1 us => collide)
+  full cycles measured : 591
+  mean fire-time spread: 0.579 us   (12 clients agree on "now" to ~1 us => collide)
   max  fire-time spread: 335.256 us
 ```
 
@@ -127,9 +127,9 @@ settles to ~µs.)
 ### Bottleneck (swCore→coreClient egress, cap 20) under aligned bursts
 
 ```
-  frames offered  : 52380 (15 frags x 12 clients x cycles)
-  delivered       : 6093
-  dropped         : 46382 (88.39% of offered-into-queue)
+  frames offered  : 106380 (15 frags x 12 clients x cycles)
+  delivered       : 12393
+  dropped         : 94202 (88.37% of offered-into-queue)
   queue backlog   : mean 0.33/20, max 20/20
 ```
 
@@ -212,7 +212,7 @@ was sub-ns.
 
 ```
   [PASS] baseline (no bursts): every node converges (|final| < 2 us)
-  [PASS] bursts genuinely aligned by gPTP sync (mean spread 1.153 us < 50 us)
+  [PASS] bursts genuinely aligned by gPTP sync (mean spread 0.579 us < 50 us)
   [PASS] congestion is real: aligned microbursts overflow the finite queue
 ```
 
@@ -229,9 +229,11 @@ result is reported as data, per `feedback.ini`'s own standard.
   degraded — a faithful reproduction of INET's M4 non-finding, with the M3
   localization mechanism confirmed present-but-negligible (~77 ns) at `coreClient`.
 - **Does not (deferred / simplified):** perfect `scheduleForAbsoluteTime`
-  re-anchoring (S6), hop-by-hop L2 forwarding (S5), IEEE TLV wire format / pcap.
-  Carries S1/S4 forward unchanged; **S2 (2-step framing) closed by P2b** and
-  **S3 (`neighborRateRatio`) closed by P2a** (both negligible on M4 — ≤ 1 ns).
+  re-anchoring (S6), hop-by-hop L2 forwarding (S5), **IEEE-TLV-dissectable** pcap
+  (own-format pcap capture IS available — P2c, `--pcapPrefix`, off by default,
+  verify with `ns3/scripts/check_pcap_gptp.py`; the IEEE TLV wire format is
+  Tier 3). Carries S1/S4 forward unchanged; **S2 (2-step framing) closed by P2b**
+  and **S3 (`neighborRateRatio`) closed by P2a** (both negligible on M4 — ≤ 1 ns).
 
 ### Honest licensing note
 

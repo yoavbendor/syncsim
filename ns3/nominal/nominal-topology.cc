@@ -236,7 +236,7 @@ WriteVectorsCsv(const std::string& dir,
 int
 main(int argc, char* argv[])
 {
-    double simTime = 30.0;
+    double simTime = 60.0; // P2d: normalized to OMNeT++'s 60s (was 30s); override with --simTime
     double syncIntervalMs = 125.0;  // INET default gPTP syncInterval
     double pdelayIntervalMs = 50.0; // peer-delay refresh
     double finalTolUs = 2.0;        // "final offset near 0" tolerance
@@ -250,6 +250,11 @@ main(int argc, char* argv[])
                  "Phase 4: directory to write vectors.csv (opp_scavetool schema) "
                  "for scripts/analyze.py; empty = skip (default)",
                  resultDir);
+    std::string pcapPrefix = ""; // P2c: pcap capture prefix (empty = off, default)
+    cmd.AddValue("pcapPrefix",
+                 "P2c: enable pcap capture on every CSMA device (gPTP path) with this "
+                 "file prefix; empty = off (default)",
+                 pcapPrefix);
     cmd.Parse(argc, argv);
 
     // Deterministic. The only RNG use below is the 12 client drift draws; pinning
@@ -389,6 +394,15 @@ main(int argc, char* argv[])
     {
         Simulator::Schedule(MilliSeconds(5), &SampleQueueLengths, MilliSeconds(5),
                             Seconds(simTime));
+    }
+
+    // P2c: opt-in pcap on every CSMA device (gPTP path). Off by default (empty
+    // prefix) so gates/stdout are byte-identical when unset. Reuses Phase 0's
+    // EnablePcapAll; captures this project's own GptpHeader wire format (verify
+    // with ns3/scripts/check_pcap_gptp.py -- not Wireshark-dissectable 802.1AS).
+    if (!pcapPrefix.empty())
+    {
+        csma.EnablePcapAll(pcapPrefix, false);
     }
 
     Simulator::Stop(Seconds(simTime));

@@ -49,12 +49,12 @@ treatment:
 | S6 | Approximate clock-driven burst scheduling (recomputed per-burst, not true mid-flight re-anchoring) | Precision-only | ns-3 has no `scheduleForAbsoluteTime` primitive | Precision only — still genuinely clock-driven | 2 |
 | — | **M3 servo lock-loss transient**: congested peak 24× larger than INET's — ✅ **FIXED (P1a): 46,281 µs → 510 µs** | **Real, undamped anomaly** | Phase 2's deadbeat-phase + naive-integral-frequency servo overreacting to a wild rate estimate after a sporadically missed Sync — **plus** (found during the fix) a peer-delay `d` corrupted to tens of ms by Pdelay contention on the saturated shared CSMA medium, the dominant driver | **Magnitude — the one number this undermined trust in** | **1** |
 | — | `queueLength:vector` not exported — ✅ **DONE (P1b)** | Missing capability, cheap | Never wired up in Phase 4; now sampled per switch-egress queue + exported to `vectors.csv` | Was blocking Pages backlog/coupling plots for ns-3 (already-scaffolded code, missing data) — now render non-empty | **1** |
-| — | No pcap capture/replay past Phase 0's smoke test | Missing capability, moderate | Not built | Debuggability gap; own-format capture/replay is cheap, IEEE-dissectable capture is not (see Tier 3) | 2 |
+| — | No pcap capture/replay past Phase 0's smoke test — ✅ **DONE (P2c)**: `--pcapPrefix` on all three scenarios + `check_pcap_gptp.py` verifier | Missing capability, moderate | ~~Not built~~ built P2c (own-format, off by default) | Debuggability gap closed; IEEE-dissectable capture still Tier 3 | 2 |
 | — | No YAML-topology-DSL equivalent (Phase B) | Missing capability, large | Not built | Every ns-3 topology is hand-coded C++, not data-driven | 3 |
 | — | No GUI/interactive tooling (Qtenv/IDE equivalent) | Missing capability, large | Not built; ns-3's own tools (NetAnim/PyViz) are a different paradigm, not a clean port target | Developer-experience gap, not a fidelity gap | 3 |
 | — | Real IEEE TLV wire format for gPTP messages | Missing capability, large | Pragmatic 19-byte custom header used throughout | Needed for genuinely Wireshark-dissectable captures — pcap alone (above) doesn't get you this | 3 |
 | — | Single topology fully proven (Nominal/Minimal shape only) | Missing capability | No generator/DSL to vary topology cheaply | Same root cause as the YAML-DSL gap | 3 |
-| — | Shorter sim-time (20–30s ns-3 runs vs. OMNeT++'s 60s) | Minor | Convenience during development | Low severity — gPTP dynamics settle fast; worth normalizing, not worth its own phase | 2 (folded into P2 verification) |
+| — | Shorter sim-time (20–30s ns-3 runs vs. OMNeT++'s 60s) — ✅ **DONE (P2d)**: default now 60s | Minor | ~~Convenience~~ normalized P2d | Low severity; peaks unchanged, time-scaled counts ~2× | 2 (folded into P2c commit) |
 | — | M6 (real `ptp4l` cross-check) | Shared gap | Never built on *either* track | Not ns-3 falling behind — a future capability for the whole project | 4 (out of scope here) |
 | — | Priority shaping (Qbv/Qav) | Shared gap | Deferred on the OMNeT++ side too (M3's original scope) | Same — not ns-3-specific | 4 (out of scope here) |
 
@@ -260,27 +260,45 @@ CSV-export/`analyze.py --strict` path still passes on the P2b build. So S2's
 additionally surfaced *where* it does not — a result only visible by verifying
 empirically, exactly as the plan required.
 
-### P2c — pcap capture on the gPTP + data path
+### P2c — pcap capture on the gPTP + data path — ✅ **DONE**
 
-Reuses Phase 0's already-proven mechanism (`csma.EnablePcapAll()`) on
-`nominal`/`congestion`/`feedback`, closing the debuggability gap those
-scenarios have had since Phase 2. **Scope discipline, stated clearly**: this
-gets you capture + a round-trip-verifiable replay in this project's own
-19-byte custom header format (mirroring the rigor of syncsim's existing C1
-pcap milestone, adapted) — **not** Wireshark-dissectable real-802.1AS
-captures. That requires the IEEE TLV wire format too (Tier 3). Don't let
-"pcap capture" quietly imply more than it delivers.
+**Status (done):** `nominal`/`congestion`/`feedback-topology.cc` each take a new
+`--pcapPrefix=<prefix>` arg that enables `CsmaHelper::EnablePcapAll` on every CSMA
+device (Phase 0's proven mechanism), writing one `<prefix>-<node>-<dev>.pcap` per
+device — gPTP frames plus, on congestion/feedback's bottleneck, the background
+data (congested/bursts pass only). **Opt-in and off by default**: with no
+`--pcapPrefix` no files are written and stdout / every gate is byte-for-byte
+unchanged (verified — capture only attaches trace sinks; the printed numbers are
+bit-identical with and without it). `ns3/scripts/check_pcap_gptp.py` (new,
+dependency-free, no scapy) is the content verifier — it parses each classic-pcap
+frame, tallies gPTP frames by `GptpMsgType` off the `0x88b6` ethertype, and
+asserts real parseable gPTP traffic **with the 2-step message types present** (a
+1-step capture could not contain `Pdelay_Resp_Follow_Up`/`Follow_Up`). Mirrors
+`scripts/check_pcap_replay.py`'s role. **Scope, as promised:** round-trip-
+verifiable in this project's own 19-byte `GptpHeader` format, **not**
+Wireshark-dissectable 802.1AS (IEEE TLV = Tier 3).
 
-**Gate:** captures are non-empty and content-verifiable via a small parser for
-this project's own header format (mirroring `scripts/check_pcap_replay.py`'s
-role); replay round-trips.
+**Verification result:** nominal's gm↔swCore capture reads all five message types
+with matched pairs (Pdelay_Req 20 / Pdelay_Resp 20 / …Follow_Up 20; Sync 7 /
+Follow_Up 7); the congestion bottleneck link reads 12 758 total frames, 118 gPTP,
+and — a bonus, honest confirmation of P2b — shows **more `Pdelay_Resp`/`Sync` than
+their paired `…Follow_Up`s** (31 vs 24, 13 vs 10): the partner frames the
+congested queue dropped, exactly the loss statistic that halves `coreClient`'s
+servo cycles. Both captures PASS the verifier (exit 0).
 
-### P2d — Normalize sim-time to 60s
+### P2d — Normalize sim-time to 60s — ✅ **DONE**
 
-Low-severity, low-effort: bring ns-3 scenario durations in line with
-OMNeT++'s standard 60s `sim-time-limit`, removing a needless axis of
-difference when comparing results side by side. Folded into this tier's
-verification pass rather than its own phase.
+**Status (done):** the default `simTime` in `nominal`/`congestion`/`feedback-`
+`topology.cc` is now **60 s** (was 30 s), matching OMNeT++'s `sim-time-limit =
+60s`, still overridable via the existing `--simTime` arg. Bundled into the P2c
+commit per the plan. Verified: all four gates still PASS, all runs deterministic
+(twice each), `analyze.py --strict --sim-time 60` PASS on all three. **Peaks are
+unchanged** (they are early transients — coreClient nominal 24.076 µs, congested
+429.207 µs, feedback delta 0.695 µs all identical to the 30 s run); only
+time-scaled quantities grew ~2× (servo counts 239→479 baseline, congested 90→153;
+congestion drop total 178 k→363 k at the same 32.7 %; feedback burst cycles
+291→591, mean alignment spread even tighter at 0.579 µs). READMEs/OBSERVABILITY
+updated to the 60 s figures.
 
 ---
 
@@ -356,8 +374,8 @@ part of this plan.
 | P1b `queueLength:vector` | 2–3 days | Low | No — unblocks existing, already-scaffolded plots |
 | P2a rate-ratio | 2–3 days | Low | No — already proven negligible |
 | P2b 2-step framing | 1 wk | Low–medium (new state machine surface) | **Mostly no, but proven empirically NOT to be free**: identical to ≤1 ns in Gate2/M2/M4; under M3's heavy loss it genuinely shifts the peak (510→429 µs) + servo count (170→90) — a faithful 2-step loss property, isolation intact |
-| P2c pcap capture | 3–5 days | Low — reuses Phase 0's proven mechanism | No |
-| P2d sim-time normalization | trivial | None | No |
+| P2c pcap capture | 3–5 days | Low — reuses Phase 0's proven mechanism | No — **DONE**, opt-in, gates byte-identical when off |
+| P2d sim-time normalization | trivial | None | No — **DONE**, peaks unchanged (transient), counts ~2× |
 | P3a S5 feasibility spike | 1 wk (spike only) | Unknown until spiked — that's the point | TBD, gated on the spike's own answer |
 | P3b YAML topology | 2–4 wk if pursued | Medium | No |
 | P3c IEEE TLV wire format | 2–4 wk if pursued | Medium | No |

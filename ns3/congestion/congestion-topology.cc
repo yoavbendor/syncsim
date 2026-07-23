@@ -173,6 +173,12 @@ struct PassState
 
 PassState* g_active = nullptr;
 
+// P2c: pcap capture prefix. Empty (default) = capture OFF, so existing gate
+// behavior and stdout are byte-identical when unset. When set (via --pcapPrefix),
+// only the congested pass is captured (the interesting one), via
+// CsmaHelper::EnablePcapAll -- Phase 0's already-proven mechanism.
+std::string g_pcapPrefix;
+
 void
 OffsetSink(int id, Time global, double offsetSec)
 {
@@ -526,6 +532,16 @@ runScenario(bool background,
                             Seconds(simTime));
     }
 
+    // P2c: opt-in pcap on every CSMA device (gPTP + data path), congested pass
+    // only. Off by default (empty prefix) so gates/stdout are unchanged. Reuses
+    // Phase 0's EnablePcapAll mechanism; captures this project's own GptpHeader
+    // wire format (verify with ns3/scripts/check_pcap_gptp.py -- NOT
+    // Wireshark-dissectable 802.1AS, which needs the IEEE TLV format = Tier 3).
+    if (background && !g_pcapPrefix.empty())
+    {
+        csma.EnablePcapAll(g_pcapPrefix, false);
+    }
+
     Simulator::Stop(Seconds(simTime));
     Simulator::Run();
     Simulator::Destroy();
@@ -554,7 +570,7 @@ runScenario(bool background,
 int
 main(int argc, char* argv[])
 {
-    double simTime = 30.0;
+    double simTime = 60.0; // P2d: normalized to OMNeT++'s 60s (was 30s); override with --simTime
     double bgStart = 1.0; // let gPTP converge first, then turn on congestion
     double syncIntervalMs = 125.0;
     double pdelayIntervalMs = 50.0;
@@ -578,6 +594,10 @@ main(int argc, char* argv[])
                  "Phase 4: directory to write vectors.csv + scalars.csv (opp_scavetool "
                  "schema, congested pass) for scripts/analyze.py; empty = skip (default)",
                  resultDir);
+    cmd.AddValue("pcapPrefix",
+                 "P2c: enable pcap capture on every CSMA device (gPTP + data path, "
+                 "congested pass) with this file prefix; empty = off (default)",
+                 g_pcapPrefix);
     cmd.Parse(argc, argv);
 
     RngSeedManager::SetSeed(1);

@@ -96,7 +96,7 @@ across INET's range, **not** an attempt to match INET's specific RNG draws
 two consecutive runs (`md5sum` matched); the only RNG use is the 12 seeded
 client drift draws, so determinism is structural under the pinned seed/run.
 
-30 s run, Sync interval 0.125 s (INET default; 239 servo corrections/node),
+60 s run (P2d: was 30 s), Sync interval 0.125 s (INET default; 479 servo corrections/node),
 peer-delay interval 0.05 s.
 
 ### Seeded client drift draws (deterministic)
@@ -112,23 +112,23 @@ peer-delay interval 0.05 s.
 ```
            node | hops |   ppm |  peak us | final us | servos
   --------------------------------------------------------------
-         swCore |  1   |  50.0 |    7.975 |    0.000 | 239
-     coreClient |  2   | 150.0 |   24.076 |    0.000 | 239
-            swA |  2   |  80.0 |   12.701 |    0.000 | 239
-            swB |  2   | −60.0 |   10.050 |    0.000 | 239
-            swC |  2   | 100.0 |   15.951 |    0.000 | 239
-    clientsA[0] |  3   | 126.6 |   20.127 |    0.000 | 239
-    clientsA[1] |  3   |  42.7 |    6.495 |    0.000 | 239
-    clientsA[2] |  3   |  −1.8 |    1.722 |    0.000 | 239
-    clientsA[3] |  3   | −47.4 |    8.147 |    0.000 | 239
-    clientsB[0] |  3   | −52.4 |    8.961 |    0.000 | 239
-    clientsB[1] |  3   | 122.6 |   19.482 |    0.000 | 239
-    clientsB[2] |  3   |−159.6 |   26.395 |    0.000 | 239
-    clientsB[3] |  3   |  33.9 |    5.062 |    0.000 | 239
-    clientsC[0] |  3   | 175.6 |   28.090 |    0.000 | 239
-    clientsC[1] |  3   |  50.4 |    7.747 |    0.000 | 239
-    clientsC[2] |  3   | 128.8 |   20.479 |    0.000 | 239
-    clientsC[3] |  3   |  23.7 |    3.402 |    0.000 | 239
+         swCore |  1   |  50.0 |    7.975 |    0.000 | 479
+     coreClient |  2   | 150.0 |   24.076 |    0.000 | 479
+            swA |  2   |  80.0 |   12.701 |    0.000 | 479
+            swB |  2   | −60.0 |   10.050 |    0.000 | 479
+            swC |  2   | 100.0 |   15.951 |    0.000 | 479
+    clientsA[0] |  3   | 126.6 |   20.127 |    0.000 | 479
+    clientsA[1] |  3   |  42.7 |    6.495 |    0.000 | 479
+    clientsA[2] |  3   |  −1.8 |    1.722 |    0.000 | 479
+    clientsA[3] |  3   | −47.4 |    8.147 |    0.000 | 479
+    clientsB[0] |  3   | −52.4 |    8.961 |    0.000 | 479
+    clientsB[1] |  3   | 122.6 |   19.482 |    0.000 | 479
+    clientsB[2] |  3   |−159.6 |   26.395 |    0.000 | 479
+    clientsB[3] |  3   |  33.9 |    5.062 |    0.000 | 479
+    clientsC[0] |  3   | 175.6 |   28.090 |    0.000 | 479
+    clientsC[1] |  3   |  50.4 |    7.747 |    0.000 | 479
+    clientsC[2] |  3   | 128.8 |   20.479 |    0.000 | 479
+    clientsC[3] |  3   |  23.7 |    3.402 |    0.000 | 479
 ```
 
 **Every one of the 18 nodes converges to 0.000 µs final and holds** (well under
@@ -189,7 +189,7 @@ Pdelay/Sync messages are now real 2-step (P2b). On M2 both are negligible: a
 handful of **transient-peak** values shifted by **≤ 1 ns** (last printed digit —
 e.g. `coreClient` peak `24.075 → 24.076 µs`; the hop-3 leaf peaks moved by ≤ 1 ns
 under P2b's extra frame/cycle), every node's **final** offset unchanged at
-`0.000 µs`, and all 239 servo counts unchanged. The reasons are physical: the
+`0.000 µs`, and all 479 servo counts unchanged. The reasons are physical: the
 servo steers each clock's *rate* to GM (so post-lock `neighborRateRatio` ≈ 1,
 < 0.5 ppb), and the 2-step bare Sync occupies the same wire slot as the old
 combined Sync with the residence correction self-compensating for the extra
@@ -208,7 +208,9 @@ gate is unchanged (all 18 nodes converge, all PASS).
   blocker.
 - **Does not (deferred):** data-plane congestion coupling (M3/M4 — this run has
   no background/burst traffic and no finite-queue contention),
-  streaming-PHY-grade timestamps (S1), IEEE TLV wire format / pcap. Carries
+  streaming-PHY-grade timestamps (S1), **IEEE-TLV-dissectable** pcap (own-format
+  pcap capture IS available now — P2c, `--pcapPrefix`, off by default, verify with
+  `ns3/scripts/check_pcap_gptp.py`; the IEEE TLV wire format is Tier 3). Carries
   forward S1/S4 unchanged; **S2 (2-step framing) is closed by P2b** and **S3
   (`neighborRateRatio`) is closed by P2a** (see the S2/S3 note above — both
   ≤ 1 ns on M2).
