@@ -46,6 +46,23 @@ clock:
   the GM is drift-free, a node's local clock time minus the global sim time at
   that sample **is** its offset-from-GM — the exact trick the INET path uses.
 
+**`vectors.csv` also carries `queueLength:vector` rows (P1b), one per traced
+switch-egress queue:**
+
+| field | value |
+|---|---|
+| `module` | `Nominal.<node>.eth<port>.macLayer.queue` (e.g. `Nominal.swCore.eth1.macLayer.queue`, the bottleneck) |
+| `name` | `queueLength:vector` |
+| `vectime` | space-separated global sim-time (s) of each backlog sample (5 ms cadence) |
+| `vecvalue` | space-separated queue backlog (packets) at each sample |
+
+- The module form is the bracket-free ns-3 shape `plot_results.py`'s
+  `BOTTLENECK`/`_resolve_bottleneck` already match, so its backlog and
+  offset-vs-backlog-coupling plots render with **zero** `plot_results.py` changes.
+- Sampling is read-only (`Queue::GetNPackets`) and scheduled only when
+  `--resultDir` is set, so it is purely additive — stdout and every gate are
+  byte-identical when unset.
+
 **`scalars.csv`** (congestion/feedback only) — columns `module,name,value`, six
 rows per switch-egress queue, module `Nominal.<node>.eth<port>.macLayer.queue`
 (port index = the gPTP port index, which matches `nominal.ned`'s port order:
@@ -94,58 +111,68 @@ python3 scripts/analyze.py <ns3-result-dir> --strict --sim-time 30 --time-window
 ### nominal (M2 topology, no traffic) — exit 0, PASS
 
 The per-node offset table, hop grouping, and time windows below are the
-`analyze.py` output; the hop peaks (hops=1 6.25; hops=2 mean 12.44 / max 18.75;
-hops=3 mean 10.56 / max 21.95 µs) are **identical** to the C++ driver's own
-in-binary report — cross-tool agreement, off the exported CSV.
+`analyze.py` output (P1a-hardened servo); the hop peaks (hops=1 7.98; hops=2 mean
+15.69 / max 24.08; hops=3 mean 13.01 / max 28.09 µs) are **identical** to the C++
+driver's own in-binary report — cross-tool agreement, off the exported CSV.
 
 ```
 [simdata] using pre-existing .../res-nominal/vectors.csv (no opp_scavetool)
-[analyze] available vector names: ['timeChanged:vector']
+[analyze] available vector names: ['queueLength:vector', 'timeChanged:vector']
 [analyze] gPTP offset-from-master per node:
-  Nominal.clientsA[0].clock      final=    +0.00us  peak=    15.83us  n=  239  hops=3
+  Nominal.clientsA[0].clock      final=    +0.00us  peak=    20.13us  n=  239  hops=3
   ... (all 17 non-GM nodes) ...
-  Nominal.coreClient.clock       final=    +0.00us  peak=    18.75us  n=  239  hops=2
-  Nominal.swCore.clock           final=    +0.00us  peak=     6.25us  n=  239  hops=1
+  Nominal.coreClient.clock       final=    +0.00us  peak=    24.08us  n=  239  hops=2
+  Nominal.swCore.clock           final=    +0.00us  peak=     7.98us  n=  239  hops=1
 [analyze] peak offset by hop count from GM:
-  hops=1  n_nodes=  1  mean_peak=    6.25us  max_peak=    6.25us
-  hops=2  n_nodes=  4  mean_peak=   12.44us  max_peak=   18.75us
-  hops=3  n_nodes= 12  mean_peak=   10.56us  max_peak=   21.95us
+  hops=1  n_nodes=  1  mean_peak=    7.98us  max_peak=    7.98us
+  hops=2  n_nodes=  4  mean_peak=   15.69us  max_peak=   24.08us
+  hops=3  n_nodes= 12  mean_peak=   13.01us  max_peak=   28.09us
 [analyze] peak |offset| by time window (4 x 7.5s, in us):
   ... per-node w0..w3 (all convergence in w0, then 0.00) ...
+[analyze] egress queue backlog (packets):
+  ... all switch queues max=0 mean=0.00 (nominal has no background traffic) ...
 [analyze] sanity check: PASS -- gPTP produced the expected, finite, bounded signals.
 ```
 
 ### congestion (M3) — exit 0, PASS
 
-`coreClient` degrades but stays **bounded under the 50 ms sanity ceiling**
-(peak 46,281 µs), while all 16 other nodes hold their baseline — the isolation
-signature, visible both in the offset table and in the queue summary. The
-bottleneck `Nominal.swCore.eth1.macLayer.queue` shows 139.86 Mbps offered and
-326,020 ppm (32.6 %) drop; every other queue carries only gPTP and drops
-nothing.
+`coreClient` degrades (peak **510.47 µs** after P1a's servo/peer-delay
+hardening — was 46,281 µs), while all 16 other nodes hold their baseline — the
+isolation signature, visible in the offset table, the new backlog vector, and the
+queue summary. The bottleneck `Nominal.swCore.eth1.macLayer.queue` shows 139.86
+Mbps offered, 326,020 ppm (32.6 %) drop, and a `queueLength:vector` backlog that
+sits at max 10 / mean 8.50 packets (P1b); every other queue carries only gPTP,
+drops nothing, and stays near-empty.
 
 ```
-  Nominal.coreClient.clock       final=+18008.94us  peak= 46280.93us  n=  170  hops=2
-  (all other nodes: peak 1.72 .. 21.95us, unchanged from nominal baseline)
+  Nominal.coreClient.clock       final=   -85.11us  peak=   510.47us  n=  170  hops=2
+  (all other nodes: peak 1.72 .. 28.09us, unchanged from nominal baseline)
 [analyze] peak |offset| by time window (4 x 7.5s, in us):
-  Nominal.coreClient.clock        46280.93  43371.55  36144.93  27153.60
+  Nominal.coreClient.clock          510.47   327.57   377.58   216.50
   (every other node: convergence in w0, then 0.00)
 [analyze] sanity check: PASS -- gPTP produced the expected, finite, bounded signals.
+[analyze] egress queue backlog (packets):
+  Nominal.swCore.eth1.macLayer.queue  max=   10  mean=  8.50
 [analyze] data-plane congestion summary (offered load, 30s window):
   Nominal.swCore.eth1.macLayer.queue    139.86 Mbps    18161.9 pps  drop=  326020.1 ppm
   Nominal.swCore.eth0.macLayer.queue      0.01 Mbps       20.0 pps  drop=       0.0 ppm
-  (... all 19 other egress queues: ~0.01 Mbps, 0.0 ppm drop ...)
+  (... all other egress queues: ~0.01 Mbps, 0.0 ppm drop ...)
 ```
 
 ### feedback (M4) — exit 0, PASS
 
-Offsets sit at baseline (no measurable coupling — M4's honest non-finding),
-while the bottleneck sees 87.0 % drop (870,441 ppm) from the aligned
-microbursts — matching the C++ report's ~88 %.
+Offsets sit at baseline except `coreClient`, whose steady-window peak shows the
+sub-µs, single-node coupling P1a surfaced (`0.695 µs` delta; all 16 others exactly
+0 — see `feedback/README.md`); the bottleneck sees 87.0 % drop (870,441 ppm) from
+the aligned microbursts (matching the C++ report's ~88 %) and a `queueLength:vector`
+backlog spiking to its 20-packet cap (mean 0.97, the bursty regime).
 
 ```
-  (all nodes: peak == nominal baseline; no coupling)
+  Nominal.coreClient.clock       final=    +0.00us  peak=    24.08us  n=  181  hops=2
+  (all other nodes: peak == nominal baseline)
 [analyze] sanity check: PASS -- gPTP produced the expected, finite, bounded signals.
+[analyze] egress queue backlog (packets):
+  Nominal.swCore.eth1.macLayer.queue  max=   20  mean=  0.97
   Nominal.swCore.eth1.macLayer.queue     18.84 Mbps     1774.0 pps  drop=  870441.0 ppm
 ```
 
@@ -182,7 +209,7 @@ comparison table) — works.
 
 ---
 
-## Mermaid / Pages pipeline — stretch goal: verified working, one small gap
+## Mermaid / Pages pipeline — stretch goal: verified working (the one gap is now closed by P1b)
 
 Not required for Gate 4 (the plan's Gate 4 is "a `--strict`-equivalent sanity
 gate green," not "appears on the Pages site"), but attempted and it works:
@@ -206,12 +233,22 @@ and levers all render. Using the OMNeT++ `.ini` for the diagram is faithful
 because the ns-3 nominal/congestion topologies *are* reproductions of those
 scenarios.
 
-**Known gap (deferred, additive):** the *backlog* and *offset-vs-backlog
-coupling* plots need a `queueLength:vector` time-series in `vectors.csv`, which
-the drivers do not yet export (they export the offset vectors and aggregate the
-backlog to mean/max scalars only). Those two plots render empty for ns-3 data;
-adding a periodic queue-length vector export is a small future addition. All
-other plots, the mermaid, the narrative, the sweep bar, and the full-site
-assembly work today. This slug is **additive** — a separate `ns3-*` set,
-alongside the existing M1–M5 pages, not replacing anything. The generated site
-is not committed (it is build output, like the OMNeT++ site).
+**Known gap — CLOSED (P1b).** The *backlog* and *offset-vs-backlog coupling*
+plots need a `queueLength:vector` time-series in `vectors.csv`. As of P1b the
+drivers export exactly that: `nominal`/`congestion`/`feedback-topology.cc` sample
+every traced switch-egress queue's backlog periodically (5 ms cadence, over the
+whole run) and write one `queueLength:vector` row per queue —
+`module = "Nominal.<node>.eth<port>.macLayer.queue"` (the bracket-free ns-3 form
+`plot_results.py`'s `BOTTLENECK`/`_resolve_bottleneck` already match),
+`vectime` = global sample time (s), `vecvalue` = backlog (packets). The
+sampling is read-only and scheduled only when `--resultDir` is set, so the
+existing stdout/gate behavior is byte-identical when it is unset (verified).
+Verified end-to-end: `plot_results.py` against fresh `congestion`/`feedback`
+output now renders **non-empty** backlog and coupling PNGs — the congestion
+bottleneck series reaches its 10-packet cap (mean ≈ 8.5), the feedback series
+spikes to its 20-packet cap under the aligned microbursts, and the coupling plot
+overlays `coreClient`'s offset on that backlog. All other plots, the mermaid, the
+narrative, the sweep bar, and the full-site assembly work today. This slug is
+**additive** — a separate `ns3-*` set, alongside the existing M1–M5 pages, not
+replacing anything. The generated site is not committed (it is build output, like
+the OMNeT++ site).

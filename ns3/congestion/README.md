@@ -2,7 +2,8 @@
 
 Clean-room, permissively-licensed (Apache-2.0) proof that syncsim's M3
 ("congestion") scenario reproduces on ns-3, built on the Phase-1 `syncsim::Clock`
-and the **unchanged** Phase-2/M2 gPTP mechanism. Reproduces
+and the Phase-2/M2 gPTP mechanism (hardened in **P1a** — bounded PI servo +
+missed-Sync handling + peer-delay outlier filter; see below). Reproduces
 `simulations/congestion.ini`.
 
 ## The finding this phase reproduces
@@ -23,16 +24,16 @@ Same constraint every prior phase hit: ns-3's scratch build makes each
 `scratch/<subdir>` an independent target and **cannot share a `.cc` across
 sibling scratch subdirs**, and the Dockerfile is one `COPY ns3/congestion` line.
 So `clock.{h,cc}` and `gptp.{h,cc}` are copied in **byte-identical** (confirmed by
-`md5sum` against `ns3/nominal/` = `ns3/gptp/` = `ns3/clock/`). The M3 data-plane
-+ congestion machinery is entirely in the topology driver; the gPTP model is
-unchanged.
+`md5sum` against `ns3/nominal/` = `ns3/gptp/` = `ns3/feedback/`). The M3 data-plane
++ congestion machinery is entirely in the topology driver; the gPTP model is the
+P1a-hardened `gptp.{h,cc}`, vendored identically across all four scenario dirs.
 
 ## Files
 
 | File | Role | License |
 |---|---|---|
 | `congestion-topology.cc` | M3 proof scenario (`main`) — 18-node run, baseline vs congested | Apache-2.0 (ours) |
-| `gptp.h` / `gptp.cc` | **Vendored byte-identical** from `ns3/gptp/` — unchanged | Apache-2.0 (ours) |
+| `gptp.h` / `gptp.cc` | **Vendored byte-identical** from `ns3/gptp/` (P1a-hardened servo) | Apache-2.0 (ours) |
 | `clock.h` / `clock.cc` | **Vendored byte-identical** from `ns3/clock/` | Apache-2.0 (ours) |
 
 Builds as target **`congestion-topology`** →
@@ -107,58 +108,80 @@ descriptors that matter — line up.)
 ```
            node | hops |   ppm |  base peak |  cong peak |  ratio
   ----------------------------------------------------------------
-         swCore |  1   |  50.0 |     6.250  |     6.250  |   1.0x
-     coreClient |  2   | 150.0 |    18.750  | 46280.929  | 2468.3x   <-- degrades
-            swA |  2   |  80.0 |    10.000  |    10.000  |   1.0x
-            swB |  2   | -60.0 |     8.501  |     8.501  |   1.0x
-            swC |  2   | 100.0 |    12.500  |    12.500  |   1.0x
-    clientsA[0] |  3   | 126.6 |    15.828  |    15.828  |   1.0x
-    clientsA[1] |  3   |  42.7 |     5.342  |     5.342  |   1.0x
+         swCore |  1   |  50.0 |     7.975  |     7.975  |   1.0x
+     coreClient |  2   | 150.0 |    24.075  |   510.471  |  21.2x   <-- degrades
+            swA |  2   |  80.0 |    12.700  |    12.700  |   1.0x
+            swB |  2   | -60.0 |    10.050  |    10.050  |   1.0x
+            swC |  2   | 100.0 |    15.950  |    15.950  |   1.0x
+    clientsA[0] |  3   | 126.6 |    20.126  |    20.126  |   1.0x
+    clientsA[1] |  3   |  42.7 |     6.495  |     6.495  |   1.0x
     clientsA[2] |  3   |  -1.8 |     1.723  |     1.723  |   1.0x
-    clientsA[3] |  3   | -47.4 |     7.423  |     7.423  |   1.0x
-    clientsB[0] |  3   | -52.4 |     8.046  |     8.046  |   1.0x
-    clientsB[1] |  3   | 122.6 |    15.330  |    15.330  |   1.0x
-    clientsB[2] |  3   |-159.6 |    21.460  |    21.460  |   1.0x
-    clientsB[3] |  3   |  33.9 |     4.240  |     4.240  |   1.0x
-    clientsC[0] |  3   | 175.6 |    21.952  |    21.952  |   1.0x
-    clientsC[1] |  3   |  50.4 |     6.305  |     6.305  |   1.0x
-    clientsC[2] |  3   | 128.8 |    16.098  |    16.098  |   1.0x
-    clientsC[3] |  3   |  23.7 |     2.964  |     2.964  |   1.0x
+    clientsA[3] |  3   | -47.4 |     8.148  |     8.148  |   1.0x
+    clientsB[0] |  3   | -52.4 |     8.961  |     8.961  |   1.0x
+    clientsB[1] |  3   | 122.6 |    19.482  |    19.482  |   1.0x
+    clientsB[2] |  3   |-159.6 |    26.394  |    26.394  |   1.0x
+    clientsB[3] |  3   |  33.9 |     5.063  |     5.063  |   1.0x
+    clientsC[0] |  3   | 175.6 |    28.089  |    28.089  |   1.0x
+    clientsC[1] |  3   |  50.4 |     7.747  |     7.747  |   1.0x
+    clientsC[2] |  3   | 128.8 |    20.478  |    20.478  |   1.0x
+    clientsC[3] |  3   |  23.7 |     3.403  |     3.403  |   1.0x
 ```
 
 **Every non-coreClient node's congested peak is byte-identical to its baseline
-(ratio exactly 1.0x)** — total isolation. `coreClient` alone degrades, by
-~2468x. `coreClient`'s servo corrections drop **239 → 170** under load: real Sync
-frames were dropped/starved from the congested queue.
+(ratio exactly 1.0x)** — total isolation, unchanged by the P1a servo hardening.
+`coreClient` alone degrades, now by **21.2x** (was 2468x pre-P1a). `coreClient`'s
+servo corrections drop **239 → 170** under load: real Sync frames were
+dropped/starved from the congested queue.
 
-### On the magnitude (18.75 µs → 46,281 µs vs INET's 1949.64 µs)
+### On the magnitude (24.08 µs → 510.47 µs vs INET's 1949.64 µs) — **fixed by P1a**
 
-The gate is the **shape**, not the digits, and the README brief says so
-explicitly. Two honest notes on why our congested peak (~46 ms) is larger than
-INET's (~1.95 ms):
+Pre-P1a this congested peak was **46,280.929 µs** — a 24x outlier over INET's
+1,949.64 µs, the sole number the ns-3 track produced that was not trustworthy at
+face value (`NS3_PARITY_PLAN.md` Tier 1). **P1a fixes it: the congested peak is
+now 510.47 µs — below INET's 1,949.64 µs, the same order of magnitude, and it is
+the genuine congested-queue Sync-delay signal rather than a servo/measurement
+artifact.** The root cause and the fix, precisely:
 
-1. **This is a servo-lock-loss transient, not free-run drift.** 46 ms at 150 ppm
-   would need ~300 s of free-running — impossible in a 30 s sim. It comes from the
-   Phase-2 servo (deadbeat phase + integral frequency, gptp.h's stated servo
-   simplification) over-reacting when Sync frames are *sporadically* dropped: a
-   single very-late or missed Sync makes its `residualPpm = offset/elapsed`
-   estimate briefly wild, the frequency loop over-corrects, and the clock
-   excursions ring before re-locking. INET's production-grade servo and its
-   milder per-frame queueing delay damp this; our first-spike servo amplifies it.
-2. It does not weaken the finding — if anything it *over*-demonstrates it: the
-   node sharing the congested queue loses lock dramatically, while every other
-   node holds its exact baseline. The **isolation** (the actual claim) is perfect.
+1. **The old servo amplified missed Syncs (partial cause).** The Phase-2 servo
+   (deadbeat phase + a fresh, unbounded `offset/elapsed` rate estimate each cycle)
+   over-reacted when a Sync was sporadically dropped: the ballooned `elapsed` made
+   its rate estimate briefly wild and the deadbeat phase rang on it. Hardening the
+   servo to a **bounded, low-pass PI loop with missed-Sync skip** (P1a) cut the
+   peak from 46,281 µs to ~20,500 µs — real, but only a ~2.3x improvement.
 
-The mean/steady-state degradation is far smaller than the 46 ms peak; the peak is
-the worst single excursion. A production port would carry Phase-2's servo forward
-as-is or harden it (out of scope for reproducing the M3 mechanism).
+2. **The dominant cause was a corrupted peer delay, discovered during P1a
+   verification.** With the servo loop stabilized, the residual ~20 ms peak traced
+   to the measured link delay `d` inflating to **15–22 ms** — ~1000x its true
+   ~2–3 µs value. Cause: the peer-delay handshake (`Pdelay_Req`/`Resp`) frames
+   contend on the **saturated shared CSMA medium** (the S5 shared-medium artifact
+   reaching the peer-delay path), so `t4 − t1` absorbs tens of ms of CSMA-backoff
+   delay and `d = ((t4−t1) − (t3−t2))/2` reads garbage. A corrupted `d` feeds
+   straight into `recvLocal − (originTs + upstreamCorr + d)` and injects a false
+   offset that *any* servo, however well-tuned, faithfully chases. A **peer-delay
+   outlier filter** (a running-minimum estimator — the true link delay is a
+   physical floor, so contention can only ever *add*, and the ~20 clean
+   pre-congestion Pdelay exchanges establish the floor) rejects the inflated
+   samples. That takes the peak from ~20,500 µs to **510.47 µs**.
+
+3. **What 510 µs *is*.** It is the real extra queueing delay a `coreClient`-bound
+   Sync experiences waiting behind a near-full 10-packet bottleneck queue
+   (10 × ~76 µs ≈ 760 µs, minus the fraction of Syncs dropped outright). That is
+   exactly the M3 mechanism — the shared-queue coupling — now measured cleanly
+   instead of being buried under servo ringing and peer-delay garbage. It stays
+   **21.2x** its own baseline (clearly the one degraded node) and sits in the same
+   ~hundreds-of-µs-to-low-ms regime as INET's 1,949.64 µs.
+
+The isolation finding is untouched (all 16 other nodes still exactly 1.0x). Both
+P1a changes live in the vendored `gptp.{h,cc}` and are documented in `gptp.h`'s
+SERVO header block and the peer-delay filter comment; both are clean-room (public
+linuxptp PI idea + a first-principles floor estimator, no ptp4l/INET source read).
 
 ## Gate checks (all PASS)
 
 ```
   [PASS] baseline (no traffic): every node still converges (|final| < 2 us)
   [PASS] congestion is real: bottleneck queue actually drops packets
-  [PASS] coreClient sync degrades under load (2468.3x its baseline, 46280.9 us)
+  [PASS] coreClient sync degrades under load (21.2x its baseline, 510.471 us)
   [PASS] every OTHER node stays within 5 us of its baseline (isolation)
 ```
 
@@ -170,8 +193,10 @@ as-is or harden it (out of scope for reproducing the M3 mechanism).
   sharing the congested egress queue** (`coreClient`), leaving all 16 other nodes
   at their exact M2 baseline. The core M3 finding reproduces.
 - **Does not (deferred / simplified):** hop-by-hop L2 forwarding of the data
-  (S5), production-grade servo behavior under loss (Phase-2 servo carried forward
-  unchanged), IEEE TLV wire format / pcap. Carries S1–S4 forward unchanged.
+  (S5), full adaptive ptp4l-grade servo behavior (P1a hardens the loop to a
+  bounded PI with missed-Sync skip + a peer-delay outlier filter, but not a full
+  spike-rejection state machine), IEEE TLV wire format / pcap. Carries S1–S4
+  forward unchanged; the gPTP model change is P1a's servo/peer-delay hardening.
 
 ### Honest licensing note
 

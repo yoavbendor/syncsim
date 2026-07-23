@@ -180,6 +180,11 @@ struct PassState
     double burstIntervalMs{100.0};
     double simTime{30.0};
     std::vector<QueueCounters> queueCounters; // Phase 4: per-switch-egress scalars
+    // P1b: per-switch-egress queue-length time series (queueLength:vector export).
+    std::vector<Ptr<Queue<Packet>>> qSampleQueues;
+    std::vector<std::string> qSampleNames;
+    std::vector<std::vector<double>> qLenTime;
+    std::vector<std::vector<double>> qLenVal;
 };
 
 PassState* g_active = nullptr;
@@ -228,6 +233,26 @@ SampleBacklog(Time interval, Time stopAt)
     g_active->backlogSamples++;
     g_active->backlogMax = std::max(g_active->backlogMax, n);
     Simulator::Schedule(interval, &SampleBacklog, interval, stopAt);
+}
+
+// P1b (M5 / observability): periodically sample every traced switch-egress
+// queue's backlog into a per-queue time series, exported as queueLength:vector
+// rows (see WriteVectorsCsv). Read-only, so it does not perturb the run; only
+// scheduled when --resultDir is set.
+void
+SampleQueueLengths(Time interval, Time stopAt)
+{
+    if (Simulator::Now() >= stopAt)
+    {
+        return;
+    }
+    double now = Simulator::Now().GetSeconds();
+    for (size_t i = 0; i < g_active->qSampleQueues.size(); ++i)
+    {
+        g_active->qLenTime[i].push_back(now);
+        g_active->qLenVal[i].push_back(g_active->qSampleQueues[i]->GetNPackets());
+    }
+    Simulator::Schedule(interval, &SampleQueueLengths, interval, stopAt);
 }
 
 void ScheduleNextBurst(int ci);
@@ -281,7 +306,8 @@ ScheduleNextBurst(int ci)
 void
 WriteVectorsCsv(const std::string& dir,
                 const std::vector<NodeMeta>& meta,
-                const std::map<int, std::vector<OffsetSample>>& traj)
+                const std::map<int, std::vector<OffsetSample>>& traj,
+                const PassState& state)
 {
     std::string path = dir + "/vectors.csv";
     std::ofstream f(path);
@@ -316,7 +342,36 @@ WriteVectorsCsv(const std::string& dir,
         f << module << ",timeChanged:vector,\"" << vt.str() << "\",\"" << vv.str() << "\"\n";
         ++written;
     }
-    std::cout << "[feedback] wrote " << path << " (" << written << " clock vectors)\n";
+    // P1b: one queueLength:vector row per traced switch-egress queue (see
+    // congestion-topology.cc for the schema rationale) -- module
+    // "Nominal.<node>.eth<port>.macLayer.queue", vectime = global time (s),
+    // vecvalue = backlog (packets). Feeds plot_results.py's backlog/coupling plots.
+    uint32_t qwritten = 0;
+    for (size_t i = 0; i < state.qSampleNames.size(); ++i)
+    {
+        if (state.qLenTime[i].empty())
+        {
+            continue;
+        }
+        std::ostringstream vt, vv;
+        vt << std::setprecision(15);
+        vv << std::setprecision(15);
+        for (size_t k = 0; k < state.qLenTime[i].size(); ++k)
+        {
+            if (k)
+            {
+                vt << ' ';
+                vv << ' ';
+            }
+            vt << state.qLenTime[i][k];
+            vv << state.qLenVal[i][k];
+        }
+        f << state.qSampleNames[i] << ",queueLength:vector,\"" << vt.str() << "\",\"" << vv.str()
+          << "\"\n";
+        ++qwritten;
+    }
+    std::cout << "[feedback] wrote " << path << " (" << written << " clock vectors, " << qwritten
+              << " queueLength vectors)\n";
 }
 
 void
@@ -365,7 +420,8 @@ runScenario(bool bursts,
             double pdelayIntervalMs,
             uint32_t queueCap,
             std::vector<Stat>& st,
-            PassState& state)
+            PassState& state,
+            bool sampleQueues)
 {
     g_active = &state;
     state.simTime = simTime;
@@ -444,6 +500,15 @@ runScenario(bool bursts,
         q->TraceConnectWithoutContext("Dequeue", MakeBoundCallback(&QDequeue, qc));
         q->TraceConnectWithoutContext("Drop", MakeBoundCallback(&QDrop, qc));
     }
+    // P1b: per-queue backlog time series (queueLength:vector export).
+    state.qSampleNames = switchDevNames;
+    state.qSampleQueues.clear();
+    for (auto& d : switchDevs)
+    {
+        state.qSampleQueues.push_back(d->GetQueue());
+    }
+    state.qLenTime.assign(switchDevs.size(), {});
+    state.qLenVal.assign(switchDevs.size(), {});
     state.bottleneckDev = coreToCoreClient.Get(0);
     state.bottleneckPeer = coreToCoreClient.Get(1)->GetAddress();
     state.bottleneckQueue = DynamicCast<CsmaNetDevice>(state.bottleneckDev)->GetQueue();
@@ -482,6 +547,15 @@ runScenario(bool bursts,
             Simulator::Schedule(Time(0), &ScheduleNextBurst, c);
         }
         Simulator::Schedule(Seconds(burstStartS), &SampleBacklog, MilliSeconds(1),
+                            Seconds(simTime));
+    }
+
+    // P1b: queueLength:vector sampling over the whole run (5 ms cadence). Only
+    // scheduled when the caller wants the CSV (--resultDir set); read-only, so
+    // when it is not scheduled the run is byte-identical to before.
+    if (sampleQueues)
+    {
+        Simulator::Schedule(MilliSeconds(5), &SampleQueueLengths, MilliSeconds(5),
                             Seconds(simTime));
     }
 
@@ -568,13 +642,14 @@ main(int argc, char* argv[])
     std::vector<Stat> stBase;
     PassState base;
     runScenario(false, meta, simTime, burstStartS, burstIntervalMs, syncIntervalMs,
-                pdelayIntervalMs, queueCap, stBase, base);
+                pdelayIntervalMs, queueCap, stBase, base, /*sampleQueues=*/false);
 
-    // Pass 2: clock-aligned bursts.
+    // Pass 2: clock-aligned bursts. Only this (exported) pass needs queue-length
+    // sampling, and only when --resultDir is set (else the run stays byte-identical).
     std::vector<Stat> stBg;
     PassState bg;
     runScenario(true, meta, simTime, burstStartS, burstIntervalMs, syncIntervalMs,
-                pdelayIntervalMs, queueCap, stBg, bg);
+                pdelayIntervalMs, queueCap, stBg, bg, /*sampleQueues=*/!resultDir.empty());
 
     // ======================= Evidence reporting =============================
     std::cout << std::fixed;
@@ -722,7 +797,7 @@ main(int argc, char* argv[])
         // See nominal-topology.cc's matching comment: std::ofstream doesn't
         // create missing directories, found during independent verification.
         std::filesystem::create_directories(resultDir);
-        WriteVectorsCsv(resultDir, meta, bg.traj);
+        WriteVectorsCsv(resultDir, meta, bg.traj, bg);
         WriteScalarsCsv(resultDir + "/scalars.csv", bg.queueCounters);
     }
 

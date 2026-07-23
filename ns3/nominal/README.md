@@ -2,7 +2,8 @@
 
 Clean-room, permissively-licensed (Apache-2.0) proof that syncsim's M2
 ("Nominal") multi-hop gPTP scenario reproduces on ns-3, built on the Phase-1
-`syncsim::Clock` and the **unchanged** Phase-2 gPTP mechanism. This is the
+`syncsim::Clock` and the Phase-2 gPTP mechanism (hardened in **P1a**, applied
+identically across all four scenarios — no nominal-specific change). This is the
 `R-BRIDGE` risk in `NS3_MIGRATION_POC_PLAN.md` — "multi-hop time-aware bridges
 with residence-time correction, the riskiest gPTP piece" — chaining the exact
 dual slave+master bridge role Phase 2 proved once, two levels deep.
@@ -14,9 +15,11 @@ field `upstreamCorrection + linkDelay + residence`) was written generically —
 nothing in it assumes exactly one bridge hop. **Does it already generalize to a
 chain of bridges (multi-hop) with zero changes to `gptp.h`/`gptp.cc`?**
 
-**Finding: yes — zero changes.** `gptp.{h,cc}` here are a **byte-identical
-vendored copy** of `ns3/gptp/`'s (confirmed by `md5sum`), not edited. The
-correction-field accumulation composes hop-by-hop by construction:
+**Finding: yes — zero multi-hop-specific changes.** `gptp.{h,cc}` here are a
+**byte-identical vendored copy** of `ns3/gptp/`'s (confirmed by `md5sum`) — the
+P1a-hardened servo, vendored identically into all four scenario dirs; nothing in
+it was touched to make multi-hop work. The correction-field accumulation composes
+hop-by-hop by construction:
 
 - `gm` sources `Sync` with `correctionField = 0`.
 - `swCore` (slave toward `gm`) reconstructs GM time as
@@ -50,14 +53,16 @@ ns3/nominal` line. So this subdir is self-contained: `clock.{h,cc}` and
 `gptp.{h,cc}` are copied in verbatim (confirmed byte-identical to
 `ns3/clock/` and `ns3/gptp/`). They are the same clean-room Apache-2.0 sources,
 not forks. **The vendored gptp being byte-identical is itself the headline
-result** — the multi-hop generalization needed no model change.
+result** — the multi-hop generalization needed no model change (the P1a servo
+hardening is a shared, scenario-agnostic change applied to that one source of
+truth, not a nominal-specific edit).
 
 ## Files
 
 | File | Role | License |
 |---|---|---|
 | `nominal-topology.cc` | M2 proof scenario (`main`) — the 18-node multi-hop run | Apache-2.0 (ours) |
-| `gptp.h` / `gptp.cc` | **Vendored byte-identical** from `ns3/gptp/` — unchanged | Apache-2.0 (ours) |
+| `gptp.h` / `gptp.cc` | **Vendored byte-identical** from `ns3/gptp/` (P1a-hardened servo) | Apache-2.0 (ours) |
 | `clock.h` / `clock.cc` | **Vendored byte-identical** from `ns3/clock/` | Apache-2.0 (ours) |
 
 Builds as target **`nominal-topology`** →
@@ -107,36 +112,42 @@ peer-delay interval 0.05 s.
 ```
            node | hops |   ppm |  peak us | final us | servos
   --------------------------------------------------------------
-         swCore |  1   |  50.0 |    6.250 |    0.000 | 239
-     coreClient |  2   | 150.0 |   18.750 |    0.000 | 239
-            swA |  2   |  80.0 |   10.000 |    0.000 | 239
-            swB |  2   | −60.0 |    8.501 |    0.000 | 239
-            swC |  2   | 100.0 |   12.500 |    0.000 | 239
-    clientsA[0] |  3   | 126.6 |   15.828 |    0.000 | 239
-    clientsA[1] |  3   |  42.7 |    5.342 |    0.000 | 239
+         swCore |  1   |  50.0 |    7.975 |    0.000 | 239
+     coreClient |  2   | 150.0 |   24.075 |    0.000 | 239
+            swA |  2   |  80.0 |   12.700 |    0.000 | 239
+            swB |  2   | −60.0 |   10.050 |    0.000 | 239
+            swC |  2   | 100.0 |   15.950 |    0.000 | 239
+    clientsA[0] |  3   | 126.6 |   20.126 |    0.000 | 239
+    clientsA[1] |  3   |  42.7 |    6.495 |    0.000 | 239
     clientsA[2] |  3   |  −1.8 |    1.723 |    0.000 | 239
-    clientsA[3] |  3   | −47.4 |    7.423 |    0.000 | 239
-    clientsB[0] |  3   | −52.4 |    8.046 |    0.000 | 239
-    clientsB[1] |  3   | 122.6 |   15.330 |    0.000 | 239
-    clientsB[2] |  3   |−159.6 |   21.460 |    0.000 | 239
-    clientsB[3] |  3   |  33.9 |    4.240 |    0.000 | 239
-    clientsC[0] |  3   | 175.6 |   21.952 |    0.000 | 239
-    clientsC[1] |  3   |  50.4 |    6.305 |    0.000 | 239
-    clientsC[2] |  3   | 128.8 |   16.098 |    0.000 | 239
-    clientsC[3] |  3   |  23.7 |    2.964 |    0.000 | 239
+    clientsA[3] |  3   | −47.4 |    8.148 |    0.000 | 239
+    clientsB[0] |  3   | −52.4 |    8.961 |    0.000 | 239
+    clientsB[1] |  3   | 122.6 |   19.482 |    0.000 | 239
+    clientsB[2] |  3   |−159.6 |   26.394 |    0.000 | 239
+    clientsB[3] |  3   |  33.9 |    5.063 |    0.000 | 239
+    clientsC[0] |  3   | 175.6 |   28.089 |    0.000 | 239
+    clientsC[1] |  3   |  50.4 |    7.747 |    0.000 | 239
+    clientsC[2] |  3   | 128.8 |   20.478 |    0.000 | 239
+    clientsC[3] |  3   |  23.7 |    3.403 |    0.000 | 239
 ```
 
 **Every one of the 18 nodes converges to 0.000 µs final and holds** (well under
-the 2 µs tolerance), across all three hop depths. That is the gate.
+the 2 µs tolerance), across all three hop depths. That is the gate. (Peaks are
+~1.29× the pre-P1a values — `coreClient` 24.08 vs the old 18.75, etc. — because
+the hardened servo's **damped** proportional phase, gain 0.7, takes ~2 Sync
+cycles rather than 1 to settle the startup transient; `final` and the gate are
+unchanged. See `gptp/README.md`'s servo-change note. `clientsA[2]` at −1.8 ppm is
+unchanged at 1.723 µs — its peak is set by first-Sync latency, not the servo gain,
+so the damping does not touch it.)
 
 ### Peak grouped by hop depth (INET's own reporting shape)
 
 ```
   hops | nodes | mean peak us | max peak us
   -------------------------------------------
-     1 |   1   |     6.250    |    6.250
-     2 |   4   |    12.438    |   18.750
-     3 |  12   |    10.559    |   21.952
+     1 |   1   |     7.975    |    7.975
+     2 |   4   |    15.694    |   24.075
+     3 |  12   |    13.009    |   28.089
   INET M2 reference (orientation only): hops=1 ~7.36; hops=2 mean 12.19 max 18.75;
                                         hops=3 mean 8.40 max 17.90 us
 ```
@@ -148,12 +159,13 @@ channel delay + one 100 Mbps frame serialization, per S1).
 ### The honest, non-obvious finding — reproduced
 
 Peak error does **not** grow monotonically with hop count. **hops=3 mean
-(10.56 µs) is *lower* than hops=2 mean (12.44 µs)** — the same qualitative
+(13.01 µs) is *lower* than hops=2 mean (15.69 µs)** — the same qualitative
 finding INET's own M2 run reported. The mechanism is visible in the per-node
 table: **each node's peak tracks its own `|drift|`, not its depth** — it lands
-almost exactly on `|ppm| × 0.125 s` (swCore 50 ppm → 6.25; coreClient 150 ppm →
-18.75; swA 80 ppm → 10.00; clientsB[2] −159.6 ppm → 21.46 ≈ 19.95 +
-multi-hop first-Sync latency). hops=2's mean is pulled up only because
+almost exactly on `|ppm| × 0.16 s` (the hardened servo's damped-phase transient
+constant; swCore 50 ppm → 7.98; coreClient 150 ppm → 24.08; swA 80 ppm → 12.70;
+clientsB[2] −159.6 ppm → 26.39 ≈ 25.5 + multi-hop first-Sync latency). hops=2's
+mean is pulled up only because
 `coreClient` (150 ppm) and `swC` (100 ppm) happen to have larger drift than the
 average of the 12 seeded zone-client draws. So the hop-by-hop
 peer-delay + residence-time correction actively **prevents** upstream error from

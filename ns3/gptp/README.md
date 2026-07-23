@@ -60,10 +60,20 @@ Topology — identical shape to `simulations/minimal.ned` and Phase 0's
    residence delay **regenerates** `Sync` on both master ports with
    `correctionField = upstreamCorrection + gm↔sw peerDelay + residenceTime`. Each
    client reconstructs `origin + correction + sw↔client peerDelay` and servos.
-3. **Servo**: on every `Sync`, `offset = localTime − reconstructedGmTime`; a
-   deadbeat **phase step** (`Clock::AdjustOffset`) nulls it, and an integral
-   **frequency correction** (`Clock::AdjustRate`, gain 0.6) cancels the residual
-   drift so the offset converges to ~0 instead of a bare sawtooth.
+3. **Servo (hardened, P1a)**: on every `Sync`, `offset = localTime −
+   reconstructedGmTime` drives a **PI control loop** — a damped **proportional
+   phase** term (`Clock::AdjustOffset`, gain 0.7) plus a **bounded, low-pass
+   integral frequency** term (`Clock::AdjustRate`) that accumulates a correction
+   clamped to ±500 ppm, normalized by the *nominal* Sync interval (never the
+   actual elapsed), and **skipped on any cycle whose gap signals a missed Sync**.
+   The offset converges to ~0 instead of a bare sawtooth. This replaces the
+   Phase-2 first-spike servo (deadbeat phase + a fresh, unbounded `offset/elapsed`
+   rate estimate each cycle) that over-reacted to a ballooned gap after a dropped
+   Sync — see the servo block in `gptp.h` and the P1a note below. A companion
+   **peer-delay outlier filter** (running-minimum estimator, also P1a) protects
+   the loop's *input*: it rejects a link-delay sample inflated by the shared-medium
+   contention artifact (M3), which would otherwise inject a false offset the servo
+   would faithfully chase.
 
 All timestamps route through node-local time — the invasive plumbing the survey
 flagged as R-GPTP's core difficulty.
@@ -127,12 +137,13 @@ then convergence to ~0:
 global(s) |   sw   (80ppm) | client1 (200ppm) | client2(-350ppm)
 ------------------------------------------------------------------------
    0.1250 |         9.5000 |          24.0020 |         -44.7560
-   0.2500 |        10.0000 |          25.0000 |         -43.7500   <- peak (~|drift|*interval)
-   0.3750 |         4.0010 |          10.0020 |         -17.5010
-   0.5000 |         1.5990 |           3.9990 |          -6.9990
-   0.6250 |         0.6400 |           1.5990 |          -2.8010
-   0.7500 |         0.2560 |           0.6400 |          -1.1190
-   2.1250 |         0.0000 |           0.0000 |           0.0000
+   0.2500 |        12.8500 |          32.2010 |         -57.1770   <- peak
+   0.3750 |         8.7160 |          28.4110 |         -54.6520
+   0.5000 |         3.9880 |          21.0230 |         -47.6470
+   0.6250 |         0.9750 |          12.5580 |         -39.2930
+   0.7500 |        -0.3190 |           4.9940 |         -30.5380
+   2.1250 |        -0.0010 |           0.0030 |          -0.0460
+   4.1250 |         0.0000 |           0.0000 |           0.0000
    ...    |         0.0000 |           0.0000 |           0.0000   (holds to t=20s)
 ```
 
@@ -141,9 +152,9 @@ Per-node summary vs the INET M1 baseline:
 ```
               node |    peak us |    final us |     peak/|ppm| | servos
 ------------------------------------------------------------------------
-      sw   (80ppm) |     10.000 |       0.000 |          0.125 | 159
-  client1 (200ppm) |     25.000 |       0.000 |          0.125 | 159
-  client2(-350ppm) |     44.756 |       0.000 |          0.128 | 159
+      sw   (80ppm) |     12.850 |       0.000 |          0.161 | 159
+  client1 (200ppm) |     32.201 |       0.000 |          0.161 | 159
+  client2(-350ppm) |     57.177 |       0.000 |          0.163 | 159
   INET M1 baseline : sw ~10.00,  client1 ~25.01,  client2 ~43.76   (all final ~0.00)
 ```
 
@@ -151,22 +162,27 @@ All five gate checks PASS:
 
 - **final offset near 0** — every node converges to 0.000 µs (well under the
   2 µs tolerance) and holds there for the whole run.
-- **peak order client2 > client1 > sw** — 44.76 > 25.00 > 10.00 µs.
-- **peak roughly proportional to |drift|** — `peak/|ppm|` = 0.125 / 0.125 / 0.128
-  (within 30 %; in fact within ~2 %).
+- **peak order client2 > client1 > sw** — 57.18 > 32.20 > 12.85 µs.
+- **peak roughly proportional to |drift|** — `peak/|ppm|` = 0.161 / 0.161 / 0.163
+  (within 30 %; in fact within ~1 %).
 - **peer delays measured, positive and small** — 6.62 µs each.
 - **servo closed the loop** — 159 corrections per node.
 
-The peaks land almost exactly on INET's M1 numbers (sw 10.00 vs ~10.00,
-client1 25.00 vs ~25.01, client2 44.76 vs ~43.76 µs) — but per the POC plan the
-gate is the **mechanism** (convergence + drift-proportional peak ordering), not
-matching those digits, which would be a fool's errand across two independent
-servo/rounding implementations. The near-match is because both this spike and
-INET's default gPTP use a 0.125 s Sync interval, so the transient peak is
-`|drift| × interval` in both. client2's 44.76 µs (vs the pure-sawtooth 43.75)
-reflects its first Sync arriving slightly after t = 0.125 s (relay + two link
-delays), so a touch more drift accumulated — physically correct, not a rounding
-artifact.
+**Servo-change note (P1a).** The transient peaks are now ~1.29× the ideal
+deadbeat `|drift| × interval` (peak/|ppm| ≈ 0.161 vs the old 0.125), and the
+loop takes ~2 clean Sync cycles rather than 1 to settle. That is the deliberate,
+disclosed cost of the hardened servo's **damped** proportional phase (gain 0.7,
+vs the old deadbeat 1.0): a fraction of each single Sync's jitter is now rejected
+instead of stepped in whole. What the Gate-2 gate actually checks — **convergence
+to ~0** and **drift-proportional peak ordering** — is *tighter* than before
+(peak/|ppm| is now uniform to ~1 %, vs ~2 % before), so the mechanism is if
+anything cleaner. The absolute peaks no longer sit on INET's M1 digits, and per
+the POC plan they were never a match target: the gate is the mechanism, not the
+digits (matching two independent servos' rounding would be a fool's errand). The
+hardening exists to fix M3's congested-peak magnitude (see `congestion/README.md`,
+46,281 µs → 510 µs) without regressing any gate; this clean-scenario transient
+shift is that fix's only visible footprint here, and it is a strict wash on the
+gated properties.
 
 ### What this does and does not establish
 
@@ -178,7 +194,9 @@ artifact.
 - **Does not (deferred to later phases):** no multi-hop residence bridges (M2 /
   R-BRIDGE), no data-plane congestion coupling (M3/M4), no neighborRateRatio
   (S3), no streaming-PHY-grade timestamps (S1), no IEEE TLV wire format / pcap.
-  The servo is a phase+integral-frequency loop, not a tuned ptp4l PI2.
+  The servo is a hardened PI loop (damped proportional phase + bounded low-pass
+  integral frequency + missed-Sync skip + a peer-delay outlier filter on its
+  input), not a full adaptive ptp4l PI2 with spike-rejection state machine.
 
 ### Honest licensing note
 

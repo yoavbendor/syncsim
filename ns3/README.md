@@ -112,14 +112,17 @@ the project's existing quality bar for OMNeT++/INET.
   `Clock`: per-link peer-delay measurement (1-step Pdelay_Req/Resp),
   Sync/correction-field propagation through `sw` acting as both slave (toward
   `gm`) and master (toward `client1`/`client2`) with real residence-time
-  accounting, and a phase-step + integral-frequency servo. `gptp-spike.cc`
-  reproduces M1's exact topology and drift rates (sw 80ppm, client1 200ppm,
-  client2 -350ppm) and its signature: every node's offset-from-GM converges to
-  0.000us and holds (159 servo corrections/node over a 20s run), with peak
-  offset correctly ordered and roughly proportional to |drift| (sw 10.00,
-  client1 25.00, client2 44.76us — within ~2% of INET's own M1 baseline
-  peaks, though per the POC plan the gate is the *mechanism*, not matching
-  those digits). Measured peer delays are real, positive, and stable
+  accounting, and a **hardened PI servo** (damped proportional phase + bounded
+  low-pass integral frequency + missed-Sync skip + peer-delay outlier filter;
+  P1a — see below). `gptp-spike.cc` reproduces M1's exact topology and drift
+  rates (sw 80ppm, client1 200ppm, client2 -350ppm) and its signature: every
+  node's offset-from-GM converges to 0.000us and holds (159 servo
+  corrections/node over a 20s run), with peak offset correctly ordered and
+  roughly proportional to |drift| (sw 12.85, client1 32.20, client2 57.18us —
+  peak/|ppm| uniform to ~1%; the hardened servo's damped phase runs the
+  transient ~1.29× the ideal deadbeat, and per the POC plan the gate is the
+  *mechanism*, convergence + drift-proportional ordering, not matching INET's
+  digits). Measured peer delays are real, positive, and stable
   (6.62us/link). Deterministic (byte-identical across two independent runs).
   **Passing Gates 1 and 2 together is the POC plan's actual "migration is
   viable" decision point** — both hold on this pinned ns-3.45. Four explicit,
@@ -147,9 +150,9 @@ the project's existing quality bar for OMNeT++/INET.
   role the single Phase-2 `sw` proved, and a bridge is simply "a node with >1
   port" — nothing counts hops. **Every one of the 18 nodes' offset-from-GM
   converges to 0.000 µs and holds** (239 servo corrections/node over a 30 s
-  run, 0.125 s Sync interval), across all three depths — the gate. Peak by hop:
-  hops=1 mean/max 6.25; hops=2 mean 12.44 max 18.75; hops=3 mean 10.56 max
-  21.95 µs — reproducing INET's non-obvious finding that peak does **not** grow
+  run, 0.125 s Sync interval), across all three depths — the gate. Peak by hop
+  (P1a-hardened servo): hops=1 mean/max 7.98; hops=2 mean 15.69 max 24.08;
+  hops=3 mean 13.01 max 28.09 µs — reproducing INET's non-obvious finding that peak does **not** grow
   monotonically with hop count (hops=3 mean < hops=2 mean), because each node's
   own local drift between corrections dominates its error more than compounding
   upstream error does; per-node peak tracks `|drift| × interval`, not depth.
@@ -171,16 +174,19 @@ the project's existing quality bar for OMNeT++/INET.
   frames toward `coreClient` are dropped/delayed from that same queue. The
   scenario runs **twice in one process** (baseline no-traffic vs congested) and
   prints per-node peak offset side by side: **`coreClient` alone degrades — by
-  ~2468x (18.75 → 46,281 µs) — while all 16 other nodes hold their baseline
+  ~21.2x (24.08 → 510 µs) — while all 16 other nodes hold their baseline
   peak byte-identically (ratio exactly 1.0x)**. `coreClient`'s servo corrections
   drop 239 → 170 (real Syncs starved from the queue). That is the M3 finding:
   **congestion degrades sync only for whoever shares the congested egress
-  queue, not globally.** The congested peak (~46 ms) is far larger than INET's
-  ~1.95 ms — an honest, documented consequence of the Phase-2 servo (deadbeat +
-  integral, gptp.h's stated servo simplification) losing lock and ringing under
-  *sporadic* Sync loss (a servo transient, not free-run drift: 46 ms at 150 ppm
-  would need ~300 s); the gate is the *shape/isolation*, not the digits, and the
-  isolation is perfect. One new simplification (**S5**): the background flows are
+  queue, not globally.** The congested peak is **510 µs** — the genuine
+  congested-queue Sync-delay signal, in the same order of magnitude as INET's
+  ~1.95 ms. **This is P1a's headline fix:** pre-P1a it was 46,281 µs, a 24×
+  outlier, traced to (a) the old deadbeat/`offset/elapsed` servo ringing on
+  sporadic Sync loss and (b) — the dominant part — a peer-delay `d` corrupted to
+  tens of ms when the Pdelay handshake contends on the saturated shared CSMA
+  medium (the S5 artifact reaching the peer-delay path). The hardened PI servo +
+  a running-minimum peer-delay outlier filter fix both; the isolation is perfect
+  and unchanged. One new simplification (**S5**): the background flows are
   injected at their convergence egress rather than L2-forwarded hop-by-hop,
   because ns-3's shared-medium `CsmaChannel` (no full-duplex mode; full-duplex
   P2P rejects the vendored gPTP ethertype) would otherwise couple gPTP to
@@ -190,7 +196,8 @@ the project's existing quality bar for OMNeT++/INET.
   **Not yet confirmed in real CI** — same Docker-daemon caveat. Full numeric
   evidence in `congestion/README.md`.
 - **M4 (Phase 3, clock-aligned burst traffic): PASSED in the sandbox —
-  faithful NON-finding, matching INET.** `feedback/feedback-topology.cc` reuses
+  localized sub-µs coupling, physical conclusion still matches INET.**
+  `feedback/feedback-topology.cc` reuses
   M3's finite-queue mechanism at `packetCapacity = 20` and replaces M3's three
   independent senders with periodic "frame" bursts from **all 12 zone clients,
   each scheduled on its OWN gPTP-steered local clock** — so the bursts align in
@@ -204,17 +211,22 @@ the project's existing quality bar for OMNeT++/INET.
   (`globalDelta = (targetLocal − currentLocal)/currentRate`) and schedules that —
   re-anchoring every burst at gPTP's own 0.125 s update granularity (stated as an
   honest analog, not bit-parity). It works: the 12 clients' bursts land within a
-  **mean 1.153 µs** of each other, emergent purely from sync quality. The
+  **mean 1.174 µs** of each other, emergent purely from sync quality. The
   microbursts genuinely congest (15 frags × 12 clients ≈ 180 frames/instant vs a
   20-slot queue → **88.4% drop**, queue hits 20/20). **The finding, reported
-  honestly: NO measurable coupling** — every node's steady-window (`t ≥ 1 s`, so
-  the identical pre-burst transient can't mask small effects) peak offset under
-  bursts is within 0.5 µs of its baseline, reproducing INET's result (Sync lands
-  in the quiet gaps between 100 ms bursts). One honest nuance reconciling M3 and
-  M4: `coreClient` — the sole node sharing the congested queue — is the *only*
-  node with any non-zero delta at all (77 ns; all 16 others exactly 0.000), so
-  M3's localization mechanism is faintly present but negligible at M4's larger
-  queue. Same mechanism, two operating points. Carries S1–S5 forward unchanged.
+  honestly (updated by P1a): coupling localized to one node, sub-µs.**
+  `coreClient` — the sole node sharing the congested queue — shows a steady-window
+  (`t ≥ 1 s`, so the identical pre-burst transient can't mask small effects) delta
+  of **0.695 µs**; all 16 other nodes are **exactly 0.000**. That 0.695 µs crosses
+  the scenario's 0.5 µs tolerance, so the driver now prints "COUPLING OBSERVED"
+  where the Phase-2 servo reported a sub-0.5 µs non-finding (~77 ns) — a real,
+  deterministic, honestly-reported change: the hardened servo surfaces the genuine
+  M3-localization signal the old servo's noise buried. The **physical conclusion is
+  unchanged** — aligned microbursts do not meaningfully degrade sync (0.7 µs at one
+  node is far below any sync-relevant threshold; the other 16 see zero) — and the
+  gate (faithful mechanism, honest reporting) still PASSES. M3 and M4 remain the
+  same mechanism at two operating points (M3: 510 µs at cap-10 + sustained load;
+  M4: 0.7 µs at cap-20 + aligned microbursts). Carries S1–S5 forward unchanged.
   Deterministic (byte-identical across two runs; RNG use is only the 12 seeded
   drift draws — bursts are clock-driven). **Not yet confirmed in real CI** —
   same Docker-daemon caveat. Full numeric evidence in `feedback/README.md`.
@@ -252,8 +264,10 @@ the project's existing quality bar for OMNeT++/INET.
   an honest finding, documented). Stretch goal (Mermaid/Pages):
   `plot_results.py`/`build_site.py` also route through the patched `simdata.py`,
   so they build a full `index.html` from the ns-3 CSVs with zero further changes
-  -- verified end-to-end; one small deferred gap (backlog/coupling plots need a
-  `queueLength:vector` export not yet emitted). **Not yet confirmed in real CI**
+  -- verified end-to-end. The one small gap here (backlog/coupling plots needed a
+  `queueLength:vector` export) is **closed by P1b**: the drivers now export a
+  per-switch-egress-queue backlog time series, so those two plots render non-empty
+  (and `analyze.py`'s own egress-backlog section lights up too). **Not yet confirmed in real CI**
   -- same Docker-daemon caveat. Full evidence, schema, and honest notes in
   `OBSERVABILITY.md`.
 - **CI/CD + GitHub Pages: wired in `.github/workflows/ci.yml`.** This closes the
