@@ -45,7 +45,7 @@ treatment:
 | S2 | 1-step Pdelay/Sync — ✅ **DONE (P2b)**: real 2-step (`Pdelay_Resp`+`Pdelay_Resp_Follow_Up`, `Sync`+`Follow_Up`) | Precision-only* | ~~Simplicity~~ implemented P2b | *Informationally identical where loss is negligible (Gate2/M2/M4 ≤1 ns); under M3's heavy loss the extra frame/cycle really does move the peak (510→429 µs) + servo count (170→90), a faithful 2-step loss property, isolation shape intact | 2 |
 | S3 | `neighborRateRatio = 1` — ✅ **DONE (P2a)**: now derived per link, folded into peer-delay + residence math | Precision-only | ~~Not implemented~~ implemented P2a | Precision only — confirmed empirically (≤ 2 ns transient effect, steady state unchanged) | 2 |
 | S4 | Per-port gPTP termination, no transparent bridging | *Not a gap* | Deliberate — real 802.1AS gPTP uses a non-forwarded reserved multicast | N/A — arguably more correct than a transparent bridge | — |
-| **S5** | **Background congestion traffic injected at the bottleneck egress, not truly forwarded hop-by-hop** | **Shape-level, real root cause** | **Mainline ns-3's `CsmaChannel` is half-duplex shared-medium; a real forwarding attempt spuriously coupled every node's sync (confirmed empirically)** | **Shape — a real topological difference from INET** | 3 |
+| ~~**S5**~~ | ~~Background congestion traffic injected at the bottleneck egress, not truly forwarded hop-by-hop~~ — ✅ **DONE (P3a real fix)**: data now L2-forwarded hop-by-hop `clientsX[0]`→`swX`→`swCore`→`coreClient` over full-duplex `SimpleNetDevice`/`SimpleChannel` | Shape-level, real root cause | ~~Mainline ns-3's `CsmaChannel` is half-duplex shared-medium~~ — closed by swapping transport to `SimpleNetDevice` (full-duplex, mainline, no core patch) + a static hand-coded L2 forwarding table | Shape — real forwarding now matches INET; isolation shape held exactly, M3 peak moved 429→551 µs, M4 coupling 0.695→0.000 µs (both reported honestly) | **3 — DONE** |
 | S6 | Approximate clock-driven burst scheduling (recomputed per-burst, not true mid-flight re-anchoring) | Precision-only | ns-3 has no `scheduleForAbsoluteTime` primitive | Precision only — still genuinely clock-driven | 2 |
 | — | **M3 servo lock-loss transient**: congested peak 24× larger than INET's — ✅ **FIXED (P1a): 46,281 µs → 510 µs** | **Real, undamped anomaly** | Phase 2's deadbeat-phase + naive-integral-frequency servo overreacting to a wild rate estimate after a sporadically missed Sync — **plus** (found during the fix) a peer-delay `d` corrupted to tens of ms by Pdelay contention on the saturated shared CSMA medium, the dominant driver | **Magnitude — the one number this undermined trust in** | **1** |
 | — | `queueLength:vector` not exported — ✅ **DONE (P1b)** | Missing capability, cheap | Never wired up in Phase 4; now sampled per switch-egress queue + exported to `vectors.csv` | Was blocking Pages backlog/coupling plots for ns-3 (already-scaffolded code, missing data) — now render non-empty | **1** |
@@ -310,20 +310,51 @@ each one carries. None of these should be treated as "planned work" — each
 needs its own explicit decision after its spike, the same discipline that
 governed R-CLOCK/R-GPTP in the original POC plan.
 
-### P3a — Feasibility spike: hop-by-hop L2 forwarding (closes S5)
+### P3a — Hop-by-hop L2 forwarding (closes S5) — ✅ **DONE (spike + real fix)**
 
-The open question: can gPTP's custom ethertype (`0x88b6`) be carried over
-*some* full-duplex ns-3 device without either (a) patching ns-3's `CsmaChannel`
-core (a research-grade undertaking, real risk of destabilizing everything
-built on top of it, and a break from the "pinned, unmodified ns-3.45" model
-that has kept this whole POC clean) or (b) the already-tried-and-rejected
-`PointToPointNetDevice` (its PPP framer rejects custom ethertypes outright)?
-**Time-box this to about a week** as a pure feasibility spike — check whether
-any other existing ns-3 device type, or a narrow reconfiguration of an
-existing one, sidesteps the problem before committing to writing a new
-`NetDevice` subclass from scratch. **Gate: a clear yes/no on whether closing
-S5 is a bounded project or an open-ended one — decide whether to proceed only
-after that answer exists, not before.**
+**Spike (feasibility, DONE):** the open question was whether gPTP's custom
+ethertype (`0x88b6`) can ride *some* full-duplex ns-3 device without patching
+`CsmaChannel` core or writing a new `NetDevice` subclass. Answer: **YES** —
+`ns3::SimpleNetDevice`/`SimpleChannel` (mainline ns-3.45) carry `0x88b6`
+full-duplex, proven in `ns3/spikes/p3a-fullduplex-spike.cc` (reverse-gPTP latency
+1.000× under forward saturation vs CSMA's 1488×). See
+`ns3/spikes/P3A_SPIKE_FINDINGS.md`.
+
+**Real fix (DONE, this phase):** built the actual S5 fix on the 18-node M3/M4
+topologies. Swapped the link transport in `congestion-topology.cc` and
+`feedback-topology.cc` from CSMA to `SimpleNetDeviceHelper` (exactly two devices per
+channel = genuine full-duplex point-to-point), preserved the finite real-dropping
+egress queue (`SimpleNetDevice::GetQueue()` + the same Enqueue/Dequeue/Drop traces),
+and built **genuine hop-by-hop data forwarding** via a static hand-coded L2 table in
+each switch's `CombinedRx` receive callback (client → zone switch → `swCore` →
+`coreClient`) — **not** a `BridgeNetDevice`, per the spike's recommendation, so
+gPTP's per-port termination (S4) stays untouched. `gptp.{h,cc}` needed **no** change
+(transport-agnostic; verified byte-identical across all four vendored copies).
+
+**Outcome (all gates re-run, honest numbers):**
+- **M3 (congestion): GATE PASS.** Isolation shape **exact** (all 16 non-`coreClient`
+  nodes ratio 1.0×, base peak == cong peak); `coreClient` congested peak **moved
+  429.207 → 550.854 µs** (17.8× → 22.6×), drop `32.73% → 29.66%`, still well below
+  INET's 1,949.64 µs. The peak moved up because the cleaner full-duplex mechanism +
+  real forwarded arrival timing changed the queueing delay a `coreClient`-bound Sync
+  sees — reported as data, not forced back.
+- **M4 (feedback): GATE PASS.** The finding flipped to a **clean full non-finding**:
+  `coreClient`'s steady-window delta **0.695 → 0.000 µs**, and all 17 nodes now
+  exactly 0.000 — matching INET's bit-identical M4 result even more closely. Two-stage
+  forwarding (zone-switch uplink cap-20 + bottleneck cap-20) changed drop `88.37% →
+  47.62%` — the honest structural consequence of real forwarding.
+- **Regression:** Gate 2 (`gptp-spike`), M2 (`nominal`) untouched and still PASS
+  (they keep CSMA; only the two congestion/feedback files changed). All four
+  scenarios deterministic (byte-identical stdout across two runs each);
+  `analyze.py --strict` PASS on fresh congestion + feedback CSVs (and now visibly
+  shows the per-hop forwarding: ~46.5 Mbps per zone uplink aggregating to ~139.5 Mbps
+  at the bottleneck).
+- **Regression cost (disclosed):** P2c pcap capture is **lost on these two
+  scenarios** — `SimpleNetDeviceHelper` is not a `PcapHelperForDevice` (no
+  `EnablePcap`). `--pcapPrefix` is now a warned no-op; restoring it needs a manual
+  per-device Phy-trace `PcapWriter` (a bounded but non-trivial follow-up gap, left
+  open). `nominal`/`gptp-spike` keep CSMA + working pcap. Data-plane observability
+  remains via `analyze.py`'s per-queue summary and the P1b `queueLength:vector`.
 
 ### P3b — YAML-topology equivalent for ns-3
 
@@ -376,7 +407,7 @@ part of this plan.
 | P2b 2-step framing | 1 wk | Low–medium (new state machine surface) | **Mostly no, but proven empirically NOT to be free**: identical to ≤1 ns in Gate2/M2/M4; under M3's heavy loss it genuinely shifts the peak (510→429 µs) + servo count (170→90) — a faithful 2-step loss property, isolation intact |
 | P2c pcap capture | 3–5 days | Low — reuses Phase 0's proven mechanism | No — **DONE**, opt-in, gates byte-identical when off |
 | P2d sim-time normalization | trivial | None | No — **DONE**, peaks unchanged (transient), counts ~2× |
-| P3a S5 feasibility spike | 1 wk (spike only) | Unknown until spiked — that's the point | TBD, gated on the spike's own answer |
+| P3a S5 fix (spike + real fix) | ✅ **DONE** | Was unknown; spike said bounded, real fix confirmed it | **Yes** — M3 peak 429→551 µs, M4 coupling 0.695→0.000 µs, isolation shape exact; pcap regressed on these two scenarios (disclosed) |
 | P3b YAML topology | 2–4 wk if pursued | Medium | No |
 | P3c IEEE TLV wire format | 2–4 wk if pursued | Medium | No |
 | P3d GUI tooling | Not recommended | — | — |

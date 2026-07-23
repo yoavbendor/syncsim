@@ -12,11 +12,12 @@ missed-Sync handling + peer-delay outlier filter; see below). Reproduces
 > whoever shares the congested egress queue with the data traffic.**
 
 Every switch port gets a finite, real-dropping `DropTailQueue` (`packetCapacity =
-10`). Background data traffic (three ~50 Mbps flows) is offered onto the single
-`swCore↔coreClient` 100 Mbps link — a guaranteed ~150-into-100 Mbps
-oversubscription. gPTP Sync frames toward `coreClient` share that exact congested
-egress queue, so `coreClient`'s sync degrades; no other node's gPTP path touches
-that queue, so every other node is untouched.
+10`). Background data traffic (three ~50 Mbps flows) **originates at
+`clientsA/B/C[0]` and is L2-forwarded hop-by-hop** (P3a — see S5 below) up to
+`coreClient`, aggregating onto the single `swCore↔coreClient` 100 Mbps link — a
+guaranteed ~150-into-100 Mbps oversubscription. gPTP Sync frames toward `coreClient`
+share that exact congested egress queue, so `coreClient`'s sync degrades; no other
+node's gPTP path touches that queue, so every other node is untouched.
 
 ## Why gptp/clock are vendored here
 
@@ -41,19 +42,23 @@ Builds as target **`congestion-topology`** →
 
 ## How the coupling arises (the mechanism)
 
-gPTP frames and data frames share the **same per-device CSMA egress queue**: both
-are emitted via `NetDevice::Send()` on the same `CsmaNetDevice`, which owns one
-finite `DropTailQueue` (Phase 0's proven drop mechanism). On the
-`swCore→coreClient` device, three ~50 Mbps flows are offered onto a 100 Mbps link,
-so that queue runs full and drops ~1/3 of everything in it. The gPTP Sync/Pdelay
-frames `swCore` regenerates toward `coreClient` must sit in — or be dropped from —
-that same congested queue, so `coreClient`'s Sync arrives late (extra unmodeled
-queueing delay folds into `recvLocal − reconstructedGmTime`) or not at all (a
-missed servo cycle). Every other switch egress carries only negligible gPTP, never
-fills, and those nodes are untouched. **The asymmetry emerges from the shared-queue
-mechanism — it is not hand-coded per node.**
+gPTP frames and forwarded data frames share the **same per-device egress queue** at
+the bottleneck: both are emitted via `NetDevice::Send()` on `swCore`'s
+`coreClient`-facing `SimpleNetDevice`, which owns one finite `DropTailQueue`. Three
+~50 Mbps flows, forwarded hop-by-hop from `clientsA/B/C[0]`, converge on that one
+100 Mbps egress, so its queue runs full and drops ~1/3 of everything in it. The
+gPTP Sync/Pdelay frames `swCore` regenerates toward `coreClient` must sit in — or be
+dropped from — that same congested queue, so `coreClient`'s Sync arrives late (extra
+unmodeled queueing delay folds into `recvLocal − reconstructedGmTime`) or not at all
+(a missed servo cycle). Every other egress carries at most one un-oversubscribed
+forwarded flow plus negligible gPTP, never fills, and those nodes are untouched —
+**and, because the links are now full-duplex, the forward transit data on a zone
+link no longer delays the reverse-direction gPTP Sync on that same link** (the CSMA
+shared-medium artifact S5 used to dodge by injecting at the egress). **The asymmetry
+emerges from the shared-queue mechanism over genuine hop-by-hop forwarding — it is
+not hand-coded per node.**
 
-## Simplifications (Phase-2's S1/S4 carried forward; S2 closed by P2b, S3 by P2a)
+## Simplifications (S1 carried forward; S2 closed by P2b, S3 by P2a, **S5 closed by P3a**; S4 is deliberate)
 
 **S3 (`neighborRateRatio`) is closed as of P2a** — derived per link from
 consecutive Pdelay exchanges and folded into the peer-delay/residence math. Its
@@ -69,24 +74,40 @@ this scenario's headline numbers (congested peak `510.473 → 429.207 µs`, serv
 count `170 → 90`), for a real, protocol-faithful loss-statistics reason detailed
 in "P2b genuinely changes this one scenario" below. S1/S4 carry forward unchanged.
 
-**S5 — background flows injected at their convergence egress.** The three flows
-are offered on `swCore`'s `coreClient`-facing device directly, rather than
-L2-forwarded hop-by-hop from `clientsA/B/C[0]` through `swA/B/C`. Reason: ns-3's
-`CsmaChannel` is a single **shared CSMA/CD medium** (mainline ns-3.45 has no
-full-duplex CSMA; a full-duplex `PointToPointNetDevice` was tried but its PPP
-framer rejects the vendored gPTP ethertype `0x88b6`, and `gptp.cc` must stay
-byte-identical). On a shared medium, 50 Mbps of transit data on a zone link
-spuriously delays the **reverse-direction** gPTP Sync on that same medium — which,
-confirmed empirically (a first hop-by-hop-forwarding attempt), coupled **every**
-node's sync to the load and destroyed the isolation the finding is about (every
-zone switch degraded to ~5 ms). INET's Ethernet links are **full-duplex**
-(independent tx/rx), which is exactly why INET gets clean isolation. Injecting the
-aggregate at the one genuinely oversubscribed egress reproduces the real
-phenomenon — the shared bottleneck queue `coreClient`'s Sync competes in — without
-the shared-medium artifact on transit links. The convergence, the oversubscription,
-the real drops, and the shared-queue coupling all land exactly where
-`congestion.ini` puts them: the `swCore→coreClient` egress. Zone links carry only
-gPTP and are therefore isolated — INET's result.
+**S5 — CLOSED (Tier 3 / P3a real fix).** The three background flows now
+**genuinely originate at `clientsA/B/C[0]` and are L2-forwarded hop-by-hop** through
+`swA/B/C` → `swCore` → `coreClient`, exactly as INET's full-duplex Ethernet
+forwards them — no longer injected directly at `swCore`'s convergence egress.
+
+The blocker was that mainline ns-3.45's `CsmaChannel` is a single **shared
+CSMA/CD medium**: on it, transit data on a zone link spuriously delays the
+**reverse-direction** gPTP Sync on that same medium, which (confirmed empirically
+by a first forwarding attempt) coupled **every** node's sync to the load and
+destroyed the isolation the finding is about. The P3a spike found the fix: swap
+the link transport to ns-3.45's **`SimpleNetDevice`/`SimpleChannel`** (mainline, no
+external module, no core patch). Each `SimpleNetDevice` owns its own tx queue and
+tx-busy state and `SimpleChannel` does no carrier sense/collision, so with exactly
+two devices per channel each link is a **genuine full-duplex point-to-point link**:
+forward transit data no longer contends with reverse-direction gPTP on the same
+link. Data forwarding is a **static, hand-coded L2 table** in `CombinedRx` (the
+topology is a fixed tree — each zone switch forwards data out its `swCore` uplink,
+`swCore` forwards out its `coreClient` egress); gPTP frames keep their per-port
+termination (**S4**, untouched) via the same dispatch, and we deliberately do **not**
+use a `BridgeNetDevice` (which would transparently forward and clash with S4). The
+oversubscription, the real drops, and the shared-queue coupling still land on the
+`swCore→coreClient` egress — but now as the **emergent result of real hop-by-hop
+forwarding**, visible in `analyze.py`'s data-plane summary as ~46.5 Mbps on each
+zone-switch uplink (zero drops) aggregating to ~139.5 Mbps at `swCore.eth1`
+(~29.6% drop). Zone links carry data one way and gPTP the other, independently, so
+every non-`coreClient` node stays exactly at baseline — INET's result, now for the
+right structural reason. `gptp.{h,cc}` needed **no** change (it is transport-agnostic,
+talking to `NetDevice::Send`/`SetReceiveCallback`), verified byte-identical across
+all four vendored copies. See `ns3/spikes/P3A_SPIKE_FINDINGS.md`.
+
+**pcap regression (disclosed):** `SimpleNetDeviceHelper` is not a
+`PcapHelperForDevice` — it has no `EnablePcap`/`EnablePcapAll`, so **P2c's pcap
+capture no longer works** on this scenario (`--pcapPrefix` is now a warned no-op).
+The P3a spike predicted this. See the "pcap" section below.
 
 ## Result — **GATE PASS** (sandbox, ns-3.45, release build, asserts on)
 
@@ -105,53 +126,70 @@ offsets side by side, so the isolation is a direct within-binary comparison.
 ### Bottleneck (swCore→coreClient egress, cap 10) under load
 
 ```
-  data offered by 3 sources : 1107019 pkts
-  delivered to coreClient   : 745749 pkts (95.66 Mbps, 12640 pps)
-  dropped at bottleneck     : 362847 pkts (32.73% of offered-into-queue)
-  queue backlog             : mean 8.81/10, max 10/10
+  data offered by 3 sources : 1106326 pkts
+  delivered to coreClient   : 779488 pkts (99.99 Mbps, 13212 pps)
+  dropped at bottleneck     : 328674 pkts (29.66% of offered-into-queue)
+  queue backlog             : mean 8.88/10, max 10/10
 ```
 
-(Counts are ~2× the former 30 s run — P2d normalized the default to 60 s; the
-rates, drop fraction, and backlog are unchanged. P2b's 2-step framing added one
-extra gPTP frame per Sync cycle and per Pdelay exchange; against the ~150 Mbps
-data flood this barely moves the drop rate, 32.64% → 32.73%.) Compare INET's own
-M3 run (orientation only, **not** a match target): ~149 Mbps / ~18,759 pps at the
-bottleneck, ~34% drop, mean backlog 9.23/10. Our drop rate (32.73%) and near-full
-backlog (8.81/10) reproduce the same regime. (Goodput
-differs because our single 946 B frame size and injection point differ from INET's
-full multi-app IP path; the **drop fraction and backlog** — the congestion
-descriptors that matter — line up.)
+**Before/after the P3a real fix** (both at the 60 s default, 2-step framing):
+
+| metric | CSMA, injected at egress | **SimpleNetDevice, real forwarding** |
+|---|---|---|
+| delivered | 745,749 (95.66 Mbps) | **779,488 (99.99 Mbps)** |
+| dropped | 362,847 (32.73%) | **328,674 (29.66%)** |
+| mean backlog | 8.81/10 | **8.88/10** |
+| `coreClient` cong peak | 429.207 µs (17.8×) | **550.854 µs (22.6×)** |
+| `coreClient` servos (cong) | 153 | **125** |
+
+The drop fraction eased slightly (32.73% → 29.66%) and goodput rose to a full
+99.99 Mbps because `SimpleNetDevice` has no CSMA inter-frame gap / framing
+overhead, so the 100 Mbps egress carries slightly more payload before saturating.
+The `coreClient` congested peak **moved up** (429 → 551 µs) — reported honestly, not
+forced back: the peak is the queueing delay a `coreClient`-bound Sync sees behind a
+near-full 10-packet bottleneck (≈10 × ~76 µs ≈ 760 µs ceiling, minus dropped
+Syncs), and the cleaner full-duplex mechanism plus real forwarded arrival timing
+lands it at 551 µs. It is still well below INET's 1,949.64 µs, same order of
+magnitude, still clearly the one degraded node. Compare INET's own M3 run
+(orientation only, **not** a match target): ~149 Mbps / ~18,759 pps, ~34% drop,
+mean backlog 9.23/10 — our 29.66% drop and 8.88/10 backlog reproduce the same
+regime.
 
 ### Per-node peak offset-from-GM: baseline vs congested
 
 ```
            node | hops |   ppm |  base peak |  cong peak |  ratio
   ----------------------------------------------------------------
-         swCore |  1   |  50.0 |     7.975  |     7.975  |   1.0x
-     coreClient |  2   | 150.0 |    24.076  |   429.207  |  17.8x   <-- degrades
-            swA |  2   |  80.0 |    12.701  |    12.701  |   1.0x
-            swB |  2   | -60.0 |    10.050  |    10.050  |   1.0x
-            swC |  2   | 100.0 |    15.951  |    15.951  |   1.0x
-    clientsA[0] |  3   | 126.6 |    20.127  |    20.127  |   1.0x
-    clientsA[1] |  3   |  42.7 |     6.495  |     6.495  |   1.0x
-    clientsA[2] |  3   |  -1.8 |     1.722  |     1.722  |   1.0x
-    clientsA[3] |  3   | -47.4 |     8.147  |     8.147  |   1.0x
-    clientsB[0] |  3   | -52.4 |     8.961  |     8.961  |   1.0x
-    clientsB[1] |  3   | 122.6 |    19.482  |    19.482  |   1.0x
-    clientsB[2] |  3   |-159.6 |    26.395  |    26.395  |   1.0x
-    clientsB[3] |  3   |  33.9 |     5.062  |     5.062  |   1.0x
-    clientsC[0] |  3   | 175.6 |    28.090  |    28.090  |   1.0x
-    clientsC[1] |  3   |  50.4 |     7.747  |     7.747  |   1.0x
-    clientsC[2] |  3   | 128.8 |    20.479  |    20.479  |   1.0x
-    clientsC[3] |  3   |  23.7 |     3.402  |     3.402  |   1.0x
+         swCore |  1   |  50.0 |     8.125  |     8.125  |   1.0x
+     coreClient |  2   | 150.0 |    24.375  |   550.854  |  22.6x   <-- degrades
+            swA |  2   |  80.0 |    13.000  |    13.000  |   1.0x
+            swB |  2   | -60.0 |     9.750  |     9.750  |   1.0x
+            swC |  2   | 100.0 |    16.250  |    16.250  |   1.0x
+    clientsA[0] |  3   | 126.6 |    20.576  |    20.576  |   1.0x
+    clientsA[1] |  3   |  42.7 |     6.945  |     6.945  |   1.0x
+    clientsA[2] |  3   |  -1.8 |     0.289  |     0.289  |   1.0x
+    clientsA[3] |  3   | -47.4 |     7.696  |     7.696  |   1.0x
+    clientsB[0] |  3   | -52.4 |     8.510  |     8.510  |   1.0x
+    clientsB[1] |  3   | 122.6 |    19.931  |    19.931  |   1.0x
+    clientsB[2] |  3   |-159.6 |    25.943  |    25.943  |   1.0x
+    clientsB[3] |  3   |  33.9 |     5.512  |     5.512  |   1.0x
+    clientsC[0] |  3   | 175.6 |    28.540  |    28.540  |   1.0x
+    clientsC[1] |  3   |  50.4 |     8.197  |     8.197  |   1.0x
+    clientsC[2] |  3   | 128.8 |    20.928  |    20.928  |   1.0x
+    clientsC[3] |  3   |  23.7 |     3.852  |     3.852  |   1.0x
 ```
 
 **Every non-coreClient node's congested peak is byte-identical to its baseline
-(ratio exactly 1.0x)** — total isolation, unchanged by P1a's servo hardening, by
-P2a's rate-ratio fold, and by P2b's 2-step framing. `coreClient` alone degrades,
-now by **17.8x** (429.207 µs; was 21.2x / 510.473 µs under 1-step, 2468x
-pre-P1a). `coreClient`'s servo corrections under load are **153** vs its **479**
-baseline (60 s run) — real Sync frames dropped/starved from the congested queue.
+(ratio exactly 1.0x)** — total isolation, now demonstrated over **genuine
+hop-by-hop forwarding** (the S5 fix) rather than egress injection, and unchanged
+by P1a's servo hardening, P2a's rate-ratio fold, and P2b's 2-step framing.
+`coreClient` alone degrades, now by **22.6x** (550.854 µs). The baseline peaks
+shifted by ≤ 0.4 µs from the CSMA numbers (e.g. `coreClient` 24.076 → 24.375 µs,
+`clientsA[2]` 1.722 → 0.289 µs — the lowest-drift node is the most sensitive to the
+transport's slightly different serialization/timing), which is expected from the
+`SimpleNetDevice` PHY convention; the isolation **shape** is exact. `coreClient`'s
+servo corrections under load are **125** vs its **479** baseline — real Sync frames
+dropped/starved from the congested queue.
 
 ### P2b (2-step framing) genuinely changes this one scenario — an honest, verified finding
 
@@ -226,10 +264,12 @@ state in which P1a was developed):
    bottleneck queue (10 × ~76 µs ≈ 760 µs, minus the fraction of Syncs dropped
    outright). That is exactly the M3 mechanism — the shared-queue coupling — now
    measured cleanly instead of being buried under servo ringing and peer-delay
-   garbage. Under P2b's 2-step framing the surviving peak is **429.21 µs** (17.8x
-   its own baseline; it was 510.47 µs / 21.2x under 1-step — the paired-frame
-   survival effect above); clearly the one degraded node either way, in the same
-   ~hundreds-of-µs-to-low-ms regime as INET's 1,949.64 µs.
+   garbage. Under P2b's 2-step framing on the old CSMA egress-injection transport
+   the surviving peak was **429.21 µs** (17.8x; 510.47 µs / 21.2x under 1-step);
+   under the **P3a real hop-by-hop forwarding over full-duplex `SimpleNetDevice`**
+   it is **550.85 µs** (22.6x) — reported as data, not forced back. Clearly the one
+   degraded node in every case, in the same ~hundreds-of-µs regime as INET's
+   1,949.64 µs.
 
 The isolation finding is untouched (all 16 other nodes still exactly 1.0x). Both
 P1a changes live in the vendored `gptp.{h,cc}` and are documented in `gptp.h`'s
@@ -241,38 +281,29 @@ linuxptp PI idea + a first-principles floor estimator, no ptp4l/INET source read
 ```
   [PASS] baseline (no traffic): every node still converges (|final| < 2 us)
   [PASS] congestion is real: bottleneck queue actually drops packets
-  [PASS] coreClient sync degrades under load (17.8x its baseline, 429.207 us)
+  [PASS] coreClient sync degrades under load (22.6x its baseline, 550.854 us)
   [PASS] every OTHER node stays within 5 us of its baseline (isolation)
 ```
 
-## pcap capture (P2c) — opt-in, off by default
+## pcap capture (P2c) — **REGRESSED by the P3a S5 fix (known follow-up gap)**
 
-`--pcapPrefix=<prefix>` enables `CsmaHelper::EnablePcapAll` on every CSMA device
-(the congested pass only), reusing Phase 0's proven capture mechanism — one
-`<prefix>-<node>-<dev>.pcap` per device, capturing **both** the gPTP frames and
-the background data flood on the shared bottleneck link. It is **off by default
-and additive**: with no `--pcapPrefix`, no files are written and stdout / every
-gate is byte-identical (verified — enabling capture leaves the printed numbers
-bit-for-bit unchanged, since it only attaches trace sinks).
+The S5 transport swap traded pcap capture for full-duplex forwarding. `CsmaHelper`
+is a `PcapHelperForDevice` (it has `EnablePcapAll`); ns-3.45's
+`SimpleNetDeviceHelper` **is not** — it has no `EnablePcap`/`EnablePcapAll` at all
+(verified in the pinned tree). The P3a spike predicted exactly this. So on this
+scenario **`--pcapPrefix` is now a warned no-op** — it prints a warning to stderr
+and writes nothing. `ns3/scripts/check_pcap_gptp.py` is unaffected (still correct
+for CSMA-format captures such as `nominal-topology`'s, which still uses CSMA), it
+just has no congestion capture to check anymore.
 
-Verify a capture is genuine (not just "a file exists") with
-`ns3/scripts/check_pcap_gptp.py`, a dependency-free parser for this project's own
-19-byte `GptpHeader` format (**not** Wireshark-dissectable 802.1AS — that needs
-the IEEE TLV wire format, Tier 3). On the bottleneck link `…-1-1.pcap` it reads,
-e.g., 12 758 total frames, 118 gPTP, with the honest P2b fingerprint visible in
-the raw trace — **more `Pdelay_Resp`/`Sync` than their paired `…Follow_Up`s** (31
-vs 24, 13 vs 10), the partner frames the congested queue dropped:
-
-```
-$ python3 ns3/scripts/check_pcap_gptp.py <prefix>-1-1.pcap
-  gPTP frames (ethertype 0x88b6): 118
-    type 0 PdelayReq            : 40
-    type 1 PdelayResp           : 31
-    type 2 Sync                 : 13
-    type 3 PdelayRespFollowUp   : 24
-    type 4 FollowUp             : 10
-  PASS: genuine, parseable gPTP capture with 2-step framing
-```
+Restoring capture would mean hand-rolling a per-device `PcapWriter` on
+`SimpleNetDevice`'s `PhyRxDrop`/tx path (its trace surface differs from CSMA's and
+does not emit real Ethernet framing) — a bounded but non-trivial follow-up, left
+as a **known gap** rather than fought here, per the plan's "disclose, don't
+silently drop" instruction. The main S5 forwarding fix is the priority; observability
+of the data plane is instead available through `analyze.py`'s per-queue Mbps/pps/drop
+summary (which now shows the real per-hop forwarding) and the `queueLength:vector`
+backlog export (P1b), both still working.
 
 ## What this does and does not establish
 
@@ -281,16 +312,19 @@ $ python3 ns3/scripts/check_pcap_gptp.py <prefix>-1-1.pcap
   Nominal topology; and gPTP↔congestion coupling is **localized to the node
   sharing the congested egress queue** (`coreClient`), leaving all 16 other nodes
   at their exact M2 baseline. The core M3 finding reproduces.
-- **Does not (deferred / simplified):** hop-by-hop L2 forwarding of the data
-  (S5), full adaptive ptp4l-grade servo behavior (P1a hardens the loop to a
-  bounded PI with missed-Sync skip + a peer-delay outlier filter, but not a full
-  spike-rejection state machine), **IEEE-TLV-dissectable** pcap (own-format pcap
-  capture IS available now — P2c, above; the IEEE TLV wire format is Tier 3).
-  Carries S1/S4 forward unchanged; **S2 (2-step framing) closed by P2b** (the one
-  Tier-2 item that moved M3's numbers — peak 510.473 → 429.207 µs, servo 170 → 90
-  at 30 s / 153 at 60 s, see the Simplifications section) and
-  **S3 (`neighborRateRatio`) closed by P2a** (≤ 2 ns
-  effect here); the P1a servo/peer-delay hardening stands.
+- **Also does (new — P3a):** the data plane is now **genuinely L2-forwarded
+  hop-by-hop** (`clientsX[0]` → `swX` → `swCore` → `coreClient`) over full-duplex
+  `SimpleNetDevice`/`SimpleChannel` links — **S5 closed** — and the isolation
+  finding survives that (all 16 other nodes still exactly 1.0x), demonstrated over
+  real forwarding rather than egress injection.
+- **Does not (deferred / simplified):** full adaptive ptp4l-grade servo behavior
+  (P1a hardens the loop to a bounded PI with missed-Sync skip + a peer-delay
+  outlier filter, but not a full spike-rejection state machine), **pcap capture on
+  this scenario** (regressed by the S5 transport swap — see the pcap section; a
+  known follow-up gap), and **IEEE-TLV-dissectable** wire format (Tier 3).
+  Carries S1 forward unchanged and S4 is deliberate; **S2 (2-step framing) closed
+  by P2b**, **S3 (`neighborRateRatio`) closed by P2a**, **S5 (hop-by-hop
+  forwarding) closed by P3a**; the P1a servo/peer-delay hardening stands.
 
 ### Honest licensing note
 
