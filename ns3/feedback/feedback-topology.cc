@@ -51,20 +51,32 @@
 //   This is S6; it is the honest analog of scheduleForAbsoluteTime, not a claim
 //   of bit-parity with it.
 //
-// Also carries S5 from M3 (bursts injected at the convergence egress rather than
-// L2-forwarded hop-by-hop, to dodge ns-3's shared-medium CsmaChannel artifact --
-// see congestion/README.md) and Phase-2's S1-S4 unchanged. Under S5 each client's
-// burst is injected on swCore's coreClient-facing device using THAT CLIENT'S
-// clock for the timing, so the emergent alignment reflects pure gPTP sync quality
-// (the quantity M4 is about), and the 12 aligned bursts collide in the same
-// finite bottleneck queue coreClient's Sync competes in.
+// S5 is now CLOSED here too (Tier 3 / P3a real fix, same as M3): each client's
+// burst GENUINELY ORIGINATES at that client and is L2-forwarded hop-by-hop
+// (clientsX[i] -> swX -> swCore -> coreClient) over full-duplex SimpleNetDevice/
+// SimpleChannel links, no longer injected at swCore's convergence egress. The
+// burst timing still uses THAT CLIENT'S own clock, so the emergent alignment
+// reflects pure gPTP sync quality (the quantity M4 is about). A structural
+// consequence to note honestly: because all 4 clients in a zone now forward their
+// aligned bursts through their shared zone-switch uplink (cap 20) BEFORE reaching
+// swCore's bottleneck (cap 20), the microburst can overflow the zone-switch queue
+// too, not only the final bottleneck -- so the drop/delivery counts differ from
+// the old single-queue injection. What is unchanged is the coupling question: only
+// coreClient shares an egress queue with data flowing in the SAME direction as its
+// Sync (swCore->coreClient), so it is the only node that can couple; on every
+// zone link the burst data flows client->switch while Sync flows switch->client,
+// and full-duplex keeps those independent. See congestion/README.md for the
+// transport swap. Phase-2's S1-S4 carry forward unchanged.
 //
 // PACKETIZATION (stated per the brief): INET's 20000B-54B frame fragments into
 // ~15 IP packets. We send each burst as kBurstFrags = 15 back-to-back frames of
-// ~1330 B, so 12 aligned clients present ~180 frames at one instant against the
-// 20-slot queue -- the microburst regime feedback.ini describes (a single
-// synchronized instant's packet count exceeding queue depth, independent of
-// sustained bandwidth).
+// ~1330 B, so 12 aligned clients present ~180 frames at one instant -- the
+// microburst regime feedback.ini describes (a single synchronized instant's
+// packet count exceeding queue depth, independent of sustained bandwidth). With
+// the S5 real forwarding, those 180 frames now traverse two finite-queue stages
+// per zone: each zone switch's uplink (4 clients x 15 = 60 frames vs its cap-20
+// queue) then swCore's bottleneck (survivors of all 3 zones vs its cap-20 queue),
+// so drops occur at both stages -- reported honestly in the numbers below.
 //
 // Determinism: RNG use is the 12 seeded client drift draws only (bursts are
 // clock-driven, not random). Two process runs are byte-identical (confirmed).
@@ -72,8 +84,7 @@
 #include "gptp.h"
 
 #include "ns3/core-module.h"
-#include "ns3/csma-module.h"
-#include "ns3/network-module.h"
+#include "ns3/network-module.h" // SimpleNetDevice/SimpleChannel/-Helper (S5 full-duplex transport)
 
 #include <algorithm>
 #include <cmath>
@@ -160,11 +171,23 @@ struct BurstCtx
     int clientIdx{0}; // 0..11
 };
 
+// S5 fix: one entry of the static hop-by-hop data-forwarding table (see
+// congestion-topology.cc). For a switch node: egress dev + peer MAC + port toward
+// coreClient; for a client: its uplink toward its zone switch (used to originate
+// its burst). The topology is a fixed tree, so the table is hand-coded.
+struct DataUplink
+{
+    Ptr<NetDevice> dev;
+    Address peer;
+    uint32_t port{0};
+};
+
 struct PassState
 {
     std::map<int, std::vector<OffsetSample>> traj;
     std::vector<syncsim::GptpEntity*> ent;
     std::vector<BurstCtx> bursts; // 12 entries when bursts are active
+    std::map<int, DataUplink> uplink; // S5: nodeId -> its data uplink toward coreClient
     Ptr<NetDevice> bottleneckDev;
     Address bottleneckPeer;
     Ptr<Queue<Packet>> bottleneckQueue;
@@ -200,6 +223,9 @@ OffsetSink(int id, Time global, double offsetSec)
     g_active->traj[id].push_back({global.GetSeconds(), offsetSec * 1e6});
 }
 
+// Dispatch by ethertype: gPTP -> per-port GptpEntity (S4 termination, NOT
+// forwarded); data -> delivered-count at coreClient, else L2-forwarded hop-by-hop
+// out this switch node's static data uplink toward coreClient (S5 real forwarding).
 bool
 CombinedRx(int nodeId,
            syncsim::GptpEntity* ent,
@@ -213,9 +239,18 @@ CombinedRx(int nodeId,
     {
         return ent->OnDeviceReceive(port, pkt, from);
     }
-    if (protocol == kDataProtocol && nodeId == CORECLIENT)
+    if (protocol == kDataProtocol)
     {
-        g_active->framesDelivered++;
+        if (nodeId == CORECLIENT)
+        {
+            g_active->framesDelivered++;
+            return true;
+        }
+        auto it = g_active->uplink.find(nodeId);
+        if (it != g_active->uplink.end() && port != it->second.port)
+        {
+            it->second.dev->Send(pkt->Copy(), it->second.peer, kDataProtocol);
+        }
     }
     return true;
 }
@@ -262,18 +297,20 @@ SampleQueueLengths(Time interval, Time stopAt)
 
 void ScheduleNextBurst(int ci);
 
-// Fire client ci's current burst: kBurstFrags back-to-back frames onto the
-// shared bottleneck egress, then schedule the next burst off the live clock.
+// Fire client ci's current burst: kBurstFrags back-to-back frames ORIGINATED on
+// THAT CLIENT's uplink device (toward its zone switch), then L2-forwarded
+// hop-by-hop to coreClient (S5 real forwarding). Schedule the next burst off the
+// live clock.
 void
 FireBurst(int ci)
 {
     BurstCtx& b = g_active->bursts[ci];
     // Record the sim-time of this cycle for the alignment measurement.
     g_active->cycleFireTimes[b.nextK].push_back(Simulator::Now().GetSeconds());
+    const DataUplink& up = g_active->uplink[6 + b.clientIdx]; // client node id = 6 + idx
     for (int f = 0; f < kBurstFrags; ++f)
     {
-        g_active->bottleneckDev->Send(Create<Packet>(kFragPayload), g_active->bottleneckPeer,
-                                      kDataProtocol);
+        up.dev->Send(Create<Packet>(kFragPayload), up.peer, kDataProtocol);
         g_active->framesOffered++;
     }
     b.nextK++;
@@ -436,9 +473,14 @@ runScenario(bool bursts,
     NodeContainer nodes;
     nodes.Create(NNODES);
 
-    CsmaHelper csma;
-    csma.SetChannelAttribute("DataRate", StringValue("100Mbps"));
-    csma.SetChannelAttribute("Delay", TimeValue(MicroSeconds(1)));
+    // S5 fix: full-duplex point-to-point links via SimpleNetDevice/SimpleChannel
+    // (mainline ns-3.45). DataRate is a per-device attribute here (CSMA had it on
+    // the channel); Delay stays a channel attribute. Install(NodeContainer(a,b))
+    // makes exactly two devices on one fresh channel == a genuine full-duplex
+    // point-to-point link. 100 Mbps / ~1 us matches the old CSMA timing.
+    SimpleNetDeviceHelper simple;
+    simple.SetDeviceAttribute("DataRate", DataRateValue(DataRate("100Mbps")));
+    simple.SetChannelAttribute("Delay", TimeValue(MicroSeconds(1)));
 
     std::vector<std::unique_ptr<syncsim::Clock>> clocks(NNODES);
     std::vector<std::unique_ptr<syncsim::GptpEntity>> ent(NNODES);
@@ -451,41 +493,60 @@ runScenario(bool bursts,
         state.ent[id] = ent[id].get();
     }
 
-    std::vector<Ptr<CsmaNetDevice>> switchDevs;
+    std::vector<Ptr<SimpleNetDevice>> switchDevs;
     std::vector<std::string> switchDevNames; // Phase 4: INET-style queue module paths
     auto qname = [&](int node, uint32_t port) {
         return "Nominal." + meta[node].name + ".eth" + std::to_string(port) + ".macLayer.queue";
     };
-    auto link = [&](int a, int b, bool aIsMaster, bool aIsSwitch, bool bIsSwitch) {
-        NetDeviceContainer dv = csma.Install(NodeContainer(nodes.Get(a), nodes.Get(b)));
+
+    // A built link: the 2-device container plus the two AddPort'd port indices, so
+    // callers can register the endpoints in the S5 data-forwarding table.
+    struct LinkResult
+    {
+        NetDeviceContainer dv;
+        uint32_t pa;
+        uint32_t pb;
+    };
+
+    auto link = [&](int a, int b, bool aIsMaster, bool aIsSwitch, bool bIsSwitch) -> LinkResult {
+        NetDeviceContainer dv = simple.Install(NodeContainer(nodes.Get(a), nodes.Get(b)));
         uint32_t pa = ent[a]->AddPort(dv.Get(0), dv.Get(1)->GetAddress(), aIsMaster);
         uint32_t pb = ent[b]->AddPort(dv.Get(1), dv.Get(0)->GetAddress(), !aIsMaster);
         dv.Get(0)->SetReceiveCallback(MakeBoundCallback(&CombinedRx, a, ent[a].get(), pa));
         dv.Get(1)->SetReceiveCallback(MakeBoundCallback(&CombinedRx, b, ent[b].get(), pb));
         if (aIsSwitch)
         {
-            switchDevs.push_back(DynamicCast<CsmaNetDevice>(dv.Get(0)));
+            switchDevs.push_back(DynamicCast<SimpleNetDevice>(dv.Get(0)));
             switchDevNames.push_back(qname(a, pa));
         }
         if (bIsSwitch)
         {
-            switchDevs.push_back(DynamicCast<CsmaNetDevice>(dv.Get(1)));
+            switchDevs.push_back(DynamicCast<SimpleNetDevice>(dv.Get(1)));
             switchDevNames.push_back(qname(b, pb));
         }
-        return dv;
+        return {dv, pa, pb};
     };
 
     link(GM, SWCORE, true, false, true);
-    NetDeviceContainer coreToCoreClient = link(SWCORE, CORECLIENT, true, true, false);
-    link(SWCORE, SWA, true, true, true);
-    link(SWCORE, SWB, true, true, true);
-    link(SWCORE, SWC, true, true, true);
+    LinkResult coreLink = link(SWCORE, CORECLIENT, true, true, false);
+    NetDeviceContainer coreToCoreClient = coreLink.dv;
+    state.uplink[SWCORE] = {coreToCoreClient.Get(0), coreToCoreClient.Get(1)->GetAddress(),
+                            coreLink.pa};
+    LinkResult coreToA = link(SWCORE, SWA, true, true, true);
+    LinkResult coreToB = link(SWCORE, SWB, true, true, true);
+    LinkResult coreToC = link(SWCORE, SWC, true, true, true);
+    state.uplink[SWA] = {coreToA.dv.Get(1), coreToA.dv.Get(0)->GetAddress(), coreToA.pb};
+    state.uplink[SWB] = {coreToB.dv.Get(1), coreToB.dv.Get(0)->GetAddress(), coreToB.pb};
+    state.uplink[SWC] = {coreToC.dv.Get(1), coreToC.dv.Get(0)->GetAddress(), coreToC.pb};
     int zoneSw[3] = {SWA, SWB, SWC};
     for (int z = 0; z < 3; ++z)
     {
         for (int i = 0; i < 4; ++i)
         {
-            link(zoneSw[z], 6 + z * 4 + i, true, true, false);
+            int clientId = 6 + z * 4 + i;
+            LinkResult cl = link(zoneSw[z], clientId, true, true, false);
+            // Client's uplink toward its zone switch -- used to ORIGINATE its burst.
+            state.uplink[clientId] = {cl.dv.Get(1), cl.dv.Get(0)->GetAddress(), cl.pb};
         }
     }
 
@@ -516,7 +577,7 @@ runScenario(bool bursts,
     state.qLenVal.assign(switchDevs.size(), {});
     state.bottleneckDev = coreToCoreClient.Get(0);
     state.bottleneckPeer = coreToCoreClient.Get(1)->GetAddress();
-    state.bottleneckQueue = DynamicCast<CsmaNetDevice>(state.bottleneckDev)->GetQueue();
+    state.bottleneckQueue = DynamicCast<SimpleNetDevice>(state.bottleneckDev)->GetQueue();
     state.bottleneckQueue->TraceConnectWithoutContext("Drop", MakeCallback(&BottleneckDropTrace));
 
     for (int id = 1; id < NNODES; ++id)
@@ -564,13 +625,16 @@ runScenario(bool bursts,
                             Seconds(simTime));
     }
 
-    // P2c: opt-in pcap on every CSMA device (gPTP + burst data path), bursts pass
-    // only. Off by default (empty prefix) so gates/stdout are unchanged. Captures
-    // this project's own GptpHeader wire format (verify with
-    // ns3/scripts/check_pcap_gptp.py -- not Wireshark-dissectable 802.1AS).
+    // P2c pcap: REGRESSED by the S5 transport swap (disclosed). SimpleNetDeviceHelper
+    // is not a PcapHelperForDevice -- no EnablePcap/EnablePcapAll (unlike CsmaHelper).
+    // The P3a spike predicted this. --pcapPrefix is honored as a warned no-op;
+    // restoring capture needs a manual per-device Phy-trace PcapWriter (follow-up
+    // gap; see feedback/README.md and ns3/OBSERVABILITY.md).
     if (bursts && !g_pcapPrefix.empty())
     {
-        csma.EnablePcapAll(g_pcapPrefix, false);
+        std::cerr << "[feedback] WARN: --pcapPrefix is a no-op under the S5 full-duplex "
+                     "SimpleNetDevice transport (no EnablePcap on SimpleNetDeviceHelper). "
+                     "See README's 'pcap' note.\n";
     }
 
     Simulator::Stop(Seconds(simTime));
@@ -627,8 +691,8 @@ main(int argc, char* argv[])
                  "schema, bursts pass) for scripts/analyze.py; empty = skip (default)",
                  resultDir);
     cmd.AddValue("pcapPrefix",
-                 "P2c: enable pcap capture on every CSMA device (gPTP + burst data path, "
-                 "bursts pass) with this file prefix; empty = off (default)",
+                 "P2c pcap prefix (REGRESSED by the S5 SimpleNetDevice transport swap -- "
+                 "SimpleNetDeviceHelper has no EnablePcap; now a warned no-op, see README)",
                  g_pcapPrefix);
     cmd.Parse(argc, argv);
 

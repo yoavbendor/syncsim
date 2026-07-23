@@ -23,12 +23,17 @@ to land in the quiet gaps between 100 ms burst cycles. So the standard here is:
 implement the mechanism faithfully and **report whatever the run actually shows,
 honestly**. A faithful non-finding is as valid as a finding.
 
-**Our result (updated by P1a): coupling is now measurable but sub-microsecond and
-localized to the single shared-queue node (`coreClient`, 0.695 µs); all 16 other
-nodes see exactly zero. The physical conclusion still matches INET — aligned
-microbursts do not meaningfully degrade sync — but the hardened servo surfaces the
-genuine M3-mechanism signal that the Phase-2 servo buried at ~77 ns. Reported
-honestly, not forced back to the old label (below).**
+**Our result (updated by P3a — the S5 real-forwarding fix): a clean full
+non-finding. With the data plane genuinely L2-forwarded hop-by-hop over
+full-duplex links (S5 closed), NO node shows any measurable coupling —
+`coreClient`'s delta is now exactly `0.000 µs` (it was `0.695 µs` under the old
+CSMA egress-injection transport), and all 16 other nodes are 0.000 too. Despite
+47.6% queue drop, every node's steady-window peak offset is bit-identical between
+the no-traffic baseline and the aligned-burst pass — matching INET's original M4
+non-finding (bit-for-bit-identical offsets) even more closely than before. The
+faint 0.695 µs coreClient delta that P1a had surfaced was partly a residue of the
+CSMA egress-injection transport; the cleaner mechanism removes it. Reported
+honestly, not forced (below).**
 
 ## The genuinely new mechanism — clock-driven scheduling (S6)
 
@@ -62,28 +67,31 @@ emergent alignment M4 is about.
 ## Simplifications
 
 - **S6** — clock-driven scheduling analog (above), new this phase.
-- **S5** (carried from M3, see `congestion/README.md`) — bursts injected at the
-  convergence egress (`swCore`'s `coreClient`-facing device) rather than
-  L2-forwarded hop-by-hop, to dodge ns-3's shared-medium `CsmaChannel` artifact.
-  Each client's burst is injected there **using that client's own clock for the
-  timing**, so the emergent alignment reflects pure gPTP sync quality and the 12
-  aligned bursts collide in the same finite bottleneck queue `coreClient`'s Sync
-  competes in.
+- **S5** — **CLOSED by P3a** (same fix as M3, see `congestion/README.md`). Each
+  client's burst now **genuinely originates at that client and is L2-forwarded
+  hop-by-hop** (`clientsX[i]` → `swX` → `swCore` → `coreClient`) over full-duplex
+  `SimpleNetDevice`/`SimpleChannel` links, using **that client's own clock for the
+  timing**, so the emergent alignment still reflects pure gPTP sync quality. A
+  structural consequence, reported honestly: all 4 clients in a zone now forward
+  their aligned bursts through their **shared zone-switch uplink** (cap 20) *before*
+  the bursts reach `swCore`'s bottleneck (cap 20), so the microburst overflows the
+  zone-switch queue too, not only the final bottleneck — which changes the
+  drop/delivery counts (below). The **coupling question** is unaffected: only
+  `coreClient` shares an egress queue with data flowing in the *same* direction as
+  its Sync (`swCore→coreClient`), so it is the only node that *can* couple; on every
+  zone link burst data flows client→switch while Sync flows switch→client, and
+  full-duplex keeps those independent.
 - **Packetization** (stated per the brief): INET's `20000B − 54B` frame fragments
   into ~15 IP packets. We send each burst as **15 back-to-back frames of ~1330 B**,
-  so 12 aligned clients present ~180 frames at one instant against the 20-slot
-  queue — the microburst regime `feedback.ini` describes (a single synchronized
-  instant's packet count exceeding queue depth, independent of sustained
-  bandwidth).
-- **S1/S4** from Phase 2 carried forward unchanged. **S3 (`neighborRateRatio`)
-  closed by P2a** and **S2 (2-step framing) closed by P2b** — folded into /
-  reframed the same peer-delay/Sync path. Their combined effect on M4 is
-  negligible: a handful of steady-window peaks shifted by ≤ 1 ns (last printed
-  digit), `coreClient`'s delta is `0.695 µs` (unchanged from P1a to 3 sig figs),
-  still the sole non-zero node, still above the 0.5 µs tolerance — so the
-  "COUPLING OBSERVED" label is unchanged. Unlike M3 (where 2-step's extra
-  frame-per-cycle bites under heavy loss), M4's light, bursty loss leaves the
-  2-step numbers essentially identical to 1-step.
+  so 12 aligned clients present ~180 frames at one instant — the microburst regime
+  `feedback.ini` describes. With the S5 real forwarding these now traverse two
+  finite-queue stages: each zone switch's uplink (4×15 = 60 frames vs cap-20) then
+  `swCore`'s bottleneck (survivors of all 3 zones vs cap-20).
+- **S1** from Phase 2 carried forward unchanged; **S4** is deliberate. **S3
+  (`neighborRateRatio`) closed by P2a**, **S2 (2-step framing) closed by P2b**,
+  **S5 (hop-by-hop forwarding) closed by P3a**. With the P3a transport, M4's coupling
+  is now a clean **0.000 µs** at every node (it was `0.695 µs` at `coreClient` under
+  CSMA egress-injection) — so the driver prints **"NO MEASURABLE COUPLING"**.
 
 ## Why gptp/clock are vendored here
 
@@ -114,7 +122,7 @@ bursts) vs bursts.
 ### Burst alignment (the emergent quantity — S6 working)
 
 ```
-  full cycles measured : 591
+  full cycles measured : 590
   mean fire-time spread: 0.579 us   (12 clients agree on "now" to ~1 us => collide)
   max  fire-time spread: 335.256 us
 ```
@@ -127,21 +135,23 @@ settles to ~µs.)
 ### Bottleneck (swCore→coreClient egress, cap 20) under aligned bursts
 
 ```
-  frames offered  : 106380 (15 frags x 12 clients x cycles)
-  delivered       : 12393
-  dropped         : 94202 (88.37% of offered-into-queue)
-  queue backlog   : mean 0.33/20, max 20/20
+  frames offered  : 106200 (15 frags x 12 clients x cycles)
+  delivered       : 32452
+  dropped         : 29502 (47.62% of offered-into-queue) -- at swCore.eth1; drops
+                    also occur at each zone-switch uplink (two-stage forwarding)
+  queue backlog   : mean 0.87/20, max 20/20
 ```
 
-Congestion is **real**: aligned microbursts overflow the 20-slot queue (hits 20/20,
-88% drop). Two honest divergences from INET's numbers (orientation only, not a
-match target): (a) our drop rate (88%) exceeds INET's ~45% because our clock-driven
-alignment is *tighter* (~1 µs spread) than INET's, so the microbursts overlap more
-completely; (b) our mean backlog (0.33/20) is far below INET's ~14–15/20 because
-our 15 fragments enqueue at one instant and drain in ~2 ms, leaving the queue empty
-~98% of the time (a low *time-average*), whereas INET's 20000 B frames serialize
-over a longer window and keep the queue fuller. Neither changes the finding — both
-are regimes of "the queue genuinely, repeatedly overflows."
+Congestion is **real**: aligned microbursts overflow the 20-slot queue (hits
+20/20). **Before/after the P3a real fix:** delivered `12,393 → 32,452`, bottleneck
+drop `88.37% → 47.62%`, mean backlog `0.33 → 0.87`. The drop rate at the final
+bottleneck fell because the burst now traverses **two** finite-queue stages — each
+zone-switch uplink already drops part of its 60-frame microburst before the
+survivors reach `swCore`, so `swCore`'s bottleneck sees a thinner, time-spread
+arrival (and `SimpleNetDevice`'s lack of CSMA inter-frame gap lets it drain
+faster). This two-stage drop is the honest structural consequence of real
+hop-by-hop forwarding; INET's ~45% single-stage drop is orientation only, not a
+match target. What is unchanged: the queue genuinely, repeatedly overflows.
 
 ### The coupling question — per-node steady-window peak, baseline vs bursts
 
@@ -154,59 +164,55 @@ is the honest coupling measure:
            node | hops |   ppm |  base peak |  burst peak |  delta us
   --------------------------------------------------------------------
          swCore |  1   |  50.0 |    0.266   |    0.266    |   0.000
-     coreClient |  2   | 150.0 |    0.910   |    1.605    |   0.695   <-- only non-zero
-            swA |  2   |  80.0 |    0.426   |    0.426    |   0.000
-            swB |  2   | -60.0 |    0.321   |    0.321    |   0.000
-            swC |  2   | 100.0 |    0.538   |    0.538    |   0.000
-    clientsA[0] |  3   | 126.6 |    0.748   |    0.748    |   0.000
+     coreClient |  2   | 150.0 |    0.915   |    0.915    |   0.000   <-- now zero too
+            swA |  2   |  80.0 |    0.427   |    0.427    |   0.000
+            swB |  2   | -60.0 |    0.320   |    0.320    |   0.000
+            swC |  2   | 100.0 |    0.543   |    0.543    |   0.000
+    clientsA[0] |  3   | 126.6 |    0.756   |    0.756    |   0.000
     clientsA[1] |  3   |  42.7 |    0.228   |    0.228    |   0.000
     clientsA[2] |  3   |  -1.8 |    0.010   |    0.010    |   0.000
     clientsA[3] |  3   | -47.4 |    0.252   |    0.252    |   0.000
-    clientsB[0] |  3   | -52.4 |    0.279   |    0.279    |   0.000
-    clientsB[1] |  3   | 122.6 |    0.717   |    0.717    |   0.000
-    clientsB[2] |  3   |-159.6 |    0.988   |    0.988    |   0.000
-    clientsB[3] |  3   |  33.9 |    0.180   |    0.180    |   0.000
-    clientsC[0] |  3   | 175.6 |    1.002   |    1.002    |   0.000
+    clientsB[0] |  3   | -52.4 |    0.278   |    0.278    |   0.000
+    clientsB[1] |  3   | 122.6 |    0.725   |    0.725    |   0.000
+    clientsB[2] |  3   |-159.6 |    0.981   |    0.981    |   0.000
+    clientsB[3] |  3   |  33.9 |    0.181   |    0.181    |   0.000
+    clientsC[0] |  3   | 175.6 |    1.007   |    1.007    |   0.000
     clientsC[1] |  3   |  50.4 |    0.269   |    0.269    |   0.000
-    clientsC[2] |  3   | 128.8 |    0.764   |    0.764    |   0.000
-    clientsC[3] |  3   |  23.7 |    0.126   |    0.126    |   0.000
+    clientsC[2] |  3   | 128.8 |    0.770   |    0.770    |   0.000
+    clientsC[3] |  3   |  23.7 |    0.127   |    0.127    |   0.000
 ```
 
-(The steady-window baseline peaks are ~10× their pre-P1a values — swCore 0.266 vs
-the old 0.026 — because the hardened servo's damped phase + integral-clamp settle
-the startup transient a little slower, so the `t ≥ 1.0 s` window still catches the
-tail of convergence rather than a dead-flat lock. All still sub-µs, all still
-converging to exactly 0.000 final; the *isolation* — 16 of 17 nodes at delta
-exactly 0.000 — is unchanged.)
+**Every node's steady-window burst peak is byte-identical to its no-traffic
+baseline (delta exactly 0.000, all 17 nodes)** — a complete non-finding, now
+including `coreClient` (0.695 → 0.000 vs the CSMA transport). Baseline peaks shifted
+by ≤ 1 ns from the CSMA numbers (the `SimpleNetDevice` PHY convention); all sub-µs,
+all converging to exactly 0.000 final.
 
-## The finding — coupling now measurable at coreClient only, still sub-µs (updated by P1a)
+## The finding — a clean full non-finding (updated by P3a)
 
-**Localized, sub-microsecond coupling — the M3 mechanism, now above the noise
-floor.** After P1a's servo/peer-delay hardening, `coreClient` — the **one** node
-whose gPTP path shares the congested egress queue — shows a steady-window delta of
-**0.695 µs** (`0.910 → 1.605 µs`), while **all 16 other nodes are exactly 0.000**.
-Because 0.695 µs exceeds the scenario's 0.5 µs `couplingTolUs` tolerance, the driver
-now prints **"COUPLING OBSERVED"** where the Phase-2 servo reported a sub-`0.5 µs`
-non-finding (the old delta was ~77 ns).
+**No measurable coupling at any node.** With the S5 real hop-by-hop forwarding over
+full-duplex links, `coreClient` — the one node whose gPTP path shares the congested
+egress queue — now shows a steady-window delta of **exactly 0.000 µs** (`0.915 →
+0.915 µs`), and so do **all 16 other nodes**. The driver prints **"NO MEASURABLE
+COUPLING"**. This reproduces INET's original M4 result — offsets bit-for-bit
+identical between the no-traffic baseline and the aligned-burst pass — even more
+closely than the CSMA transport did.
 
-**Is this a real change or an artifact? Real — and faithful.** It is deterministic,
-localized *entirely* to `coreClient` (the exact M3 shared-queue node — every other
-node is bit-exact between passes), and physically it is the same shared-queue
-coupling as M3, just at M4's gentler operating point (cap-20 queue, well-aligned
-microbursts landing mostly in the Sync-quiet gaps). Pre-P1a it was buried at ~77 ns
-partly *because* the old servo's peer-delay corruption and ringing added noise that
-masked the clean signal; the hardened loop surfaces the genuine ~0.7 µs effect. Per
-the task's guidance this is reported honestly, not forced back to the old label.
+**Where did the P1a-surfaced 0.695 µs go?** Under the old CSMA egress-injection
+transport, `coreClient` showed a `0.695 µs` steady-window delta (the only non-zero
+node). That was partly a residue of injecting the aggregate burst directly into
+`swCore`'s shared CSMA medium right where `coreClient`'s Sync competed. With the
+cleaner full-duplex mechanism — data forwarded and arriving time-spread, tx/rx
+independent — the effect drops below measurability (0.000). This is reported
+honestly as data, not tuned: the parameters are unchanged from P1a/P2a/P2b; only the
+transport changed (S5 fix).
 
-**What it does *not* change:** the physical conclusion is the same as INET's — aligned
-microbursts do **not** meaningfully degrade sync. 0.695 µs, localized to one node, is
-far below any sync-relevant threshold; the other 16 nodes see **zero** coupling. M3
-and M4 remain the *same mechanism* at two operating points: M3's tiny cap-10 queue +
-sustained oversubscription drives `coreClient` to a 510 µs congested peak; M4's cap-20
-+ brief aligned microbursts leave it at a 0.7 µs delta. The gate (faithful mechanism +
-honest reporting) is unchanged and still PASSES; only the binary coupling *label*
-flipped, because a real sub-µs effect now sits just above a 0.5 µs line drawn when it
-was sub-ns.
+**What it means:** the physical conclusion matches INET — aligned microbursts do
+**not** meaningfully degrade sync, at *any* node. M3 and M4 remain the *same
+mechanism* at two operating points: M3's tiny cap-10 queue + sustained
+oversubscription drives `coreClient` to a ~551 µs congested peak; M4's cap-20 + brief
+aligned microbursts leave every node, `coreClient` included, at exactly its baseline.
+The gate (faithful mechanism + honest reporting) is unchanged and still PASSES.
 
 ### Gate checks (all PASS — faithful mechanism, honest reporting)
 
@@ -224,16 +230,17 @@ result is reported as data, per `feedback.ini`'s own standard.
 
 - **Does:** ns-3 can schedule data traffic on each node's own gPTP-steered local
   clock (S6, the one genuinely new Phase-3 primitive), well enough that 12
-  independent clients' bursts align to ~1 µs purely from sync; and under that real,
-  aligned, queue-overflowing microburst load, gPTP sync is **not** measurably
-  degraded — a faithful reproduction of INET's M4 non-finding, with the M3
-  localization mechanism confirmed present-but-negligible (~77 ns) at `coreClient`.
+  independent clients' bursts align to ~1 µs purely from sync; that traffic is now
+  **genuinely L2-forwarded hop-by-hop** (S5 closed) over full-duplex links; and under
+  that real, aligned, queue-overflowing microburst load, gPTP sync is **not**
+  measurably degraded at any node — a faithful reproduction of INET's M4 non-finding
+  (bit-identical offsets), now with zero coupling everywhere.
 - **Does not (deferred / simplified):** perfect `scheduleForAbsoluteTime`
-  re-anchoring (S6), hop-by-hop L2 forwarding (S5), **IEEE-TLV-dissectable** pcap
-  (own-format pcap capture IS available — P2c, `--pcapPrefix`, off by default,
-  verify with `ns3/scripts/check_pcap_gptp.py`; the IEEE TLV wire format is
-  Tier 3). Carries S1/S4 forward unchanged; **S2 (2-step framing) closed by P2b**
-  and **S3 (`neighborRateRatio`) closed by P2a** (both negligible on M4 — ≤ 1 ns).
+  re-anchoring (S6), **pcap capture** (regressed by the S5 transport swap —
+  `SimpleNetDeviceHelper` has no `EnablePcap`; `--pcapPrefix` is now a warned no-op,
+  a known follow-up gap, same as `congestion/README.md`), and **IEEE-TLV** wire
+  format (Tier 3). Carries S1 forward unchanged and S4 is deliberate; **S2 closed by
+  P2b**, **S3 closed by P2a**, **S5 (hop-by-hop forwarding) closed by P3a**.
 
 ### Honest licensing note
 

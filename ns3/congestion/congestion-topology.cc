@@ -20,38 +20,53 @@
 // ---------------------------------------------------------------------------
 // HOW THE COUPLING ARISES (why this reproduces the finding at all)
 //
-// gPTP frames and data frames share the SAME per-device CSMA egress queue: both
-// are emitted via NetDevice::Send() on the same CsmaNetDevice, which owns one
-// finite DropTailQueue (Phase 0's proven drop mechanism -- smoke-topology.cc).
-// On the swCore->coreClient device, three ~50 Mbps data flows are offered onto a
-// 100 Mbps link, so that device's queue runs full and drops ~1/3 of them. The
-// gPTP Sync/Pdelay frames swCore *regenerates* toward coreClient must sit in --
-// or be dropped from -- that same congested queue. So coreClient's Sync arrives
-// late (extra, unmodeled queueing delay folds straight into recvLocal -
+// gPTP frames and data frames share the SAME per-device egress queue at the
+// bottleneck: both are emitted via NetDevice::Send() on swCore's coreClient-facing
+// SimpleNetDevice, which owns one finite DropTailQueue. Three ~50 Mbps flows are
+// forwarded hop-by-hop from clientsA/B/C[0] and converge on that one 100 Mbps
+// egress, so its queue runs full and drops ~1/3 of everything in it. The gPTP
+// Sync/Pdelay frames swCore *regenerates* toward coreClient must sit in -- or be
+// dropped from -- that same congested queue. So coreClient's Sync arrives late
+// (extra, unmodeled queueing delay folds straight into recvLocal -
 // reconstructedGmTime) or not at all (a missed servo cycle => longer free-run =>
-// bigger offset). EVERY other switch egress queue carries only negligible gPTP,
-// never fills, never drops, and those nodes' sync is untouched. That asymmetry
-// IS the finding -- it emerges from the shared-queue mechanism, it is not
-// hand-coded per node.
+// bigger offset). EVERY other egress queue carries at most one un-oversubscribed
+// forwarded flow plus negligible gPTP, never fills, never drops, and those nodes'
+// sync is untouched -- AND, because the links are now full-duplex, the forward
+// transit data on a zone link no longer delays the reverse-direction gPTP Sync on
+// that same link (the CSMA shared-medium artifact that S5 used to dodge by
+// injecting at the egress). That asymmetry IS the finding -- it emerges from the
+// shared-queue mechanism over genuine hop-by-hop forwarding, not hand-coded per node.
 //
 // ---------------------------------------------------------------------------
-// SIMPLIFICATION S5 (new this phase, stated not hidden): the three background
-// flows are injected at their CONVERGENCE egress -- swCore's coreClient-facing
-// CsmaNetDevice -- rather than L2-forwarded hop-by-hop from clientsA/B/C[0]
-// through swA/B/C. Reason: ns-3's CsmaChannel is a single shared CSMA/CD medium
-// (no full-duplex mode in mainline ns-3.45; a full-duplex point-to-point device
-// was tried but its PPP framer rejects the vendored gPTP ethertype 0x88b6, and
-// gptp.cc must stay byte-identical). On a shared medium, 50 Mbps of transit data
-// on a zone link spuriously delays the *reverse-direction* gPTP Sync on that
-// SAME medium, coupling every node's sync to the load -- an artifact absent from
-// INET's FULL-DUPLEX Ethernet links (independent tx/rx), which is exactly why
-// INET gets clean isolation. Injecting the aggregate at the one genuinely
-// oversubscribed egress reproduces the real phenomenon (the shared bottleneck
-// queue coreClient's Sync competes in) without the shared-medium artifact on
-// transit links. The convergence, the ~150-into-100 oversubscription, the real
-// drops, and the shared-queue coupling all land exactly where congestion.ini
-// puts them: the swCore->coreClient egress. The zone links carry only gPTP and
-// are therefore isolated -- exactly INET's result.
+// S5 CLOSED (Tier 3 / P3a real fix): the three background flows now GENUINELY
+// originate at clientsA/B/C[0] and are L2-forwarded hop-by-hop through swA/B/C ->
+// swCore -> coreClient, exactly as INET's full-duplex Ethernet forwards them --
+// no longer injected directly at swCore's convergence egress.
+//
+// This became possible by swapping the link transport from CsmaNetDevice/
+// CsmaChannel (a single shared half-duplex CSMA/CD medium -- the S5 root cause)
+// to ns-3.45's SimpleNetDevice/SimpleChannel (mainline, no external module). Each
+// SimpleNetDevice owns its own tx queue and tx-busy state and SimpleChannel does
+// no carrier sense / collision, so with exactly two devices per channel each link
+// is a genuine full-duplex point-to-point link: forward transit data on a link no
+// longer contends with the reverse-direction gPTP Sync on that SAME link. That is
+// precisely the coupling that destroyed a prior real-forwarding attempt on CSMA
+// (every zone switch spuriously degraded to ~5 ms). The P3a spike proved these two
+// primitives on a throwaway program (SimpleNetDevice carries 0x88b6 full-duplex,
+// reverse latency 1.000x under forward saturation vs CSMA's 1488x); this file is
+// the real fix on the actual 18-node M3 topology. See ns3/spikes/P3A_SPIKE_FINDINGS.md.
+//
+// Data forwarding is a static, hand-coded L2 table (the topology is a fixed tree,
+// so no dynamic MAC learning is needed) implemented in CombinedRx: each zone
+// switch forwards data-ethertype frames out its swCore-facing uplink; swCore
+// forwards them out its coreClient-facing egress. gPTP frames are NOT forwarded --
+// they keep their per-port termination (S4) via the same CombinedRx dispatch,
+// untouched. We deliberately do NOT use a BridgeNetDevice (which would transparently
+// forward and clash with S4's per-port gPTP termination); the spike recommended
+// this manual route. The ~150-into-100 oversubscription, the real drops, and the
+// shared-queue coupling all still land on the swCore->coreClient egress -- but now
+// as the emergent result of real hop-by-hop forwarding, and the zone links are
+// isolated because full-duplex tx/rx are independent, exactly INET's result.
 //
 // The scenario is run TWICE inside one process -- background OFF (baseline, ==
 // M2 with finite queues but no data) then background ON -- and the two per-node
@@ -67,8 +82,7 @@
 #include "gptp.h"
 
 #include "ns3/core-module.h"
-#include "ns3/csma-module.h"
-#include "ns3/network-module.h"
+#include "ns3/network-module.h" // SimpleNetDevice/SimpleChannel/-Helper (S5 full-duplex transport)
 
 #include <algorithm>
 #include <cmath>
@@ -147,6 +161,17 @@ QDrop(QueueCounters* q, Ptr<const Packet> p)
     q->dropBits += p->GetSize() * 8.0;
 }
 
+// S5 fix: one entry of the static hop-by-hop data-forwarding table. For a switch
+// node it is the egress device + peer MAC + port index toward coreClient; for a
+// source client it is the uplink toward its zone switch (used to ORIGINATE the
+// flow). The topology is a fixed tree, so this table is hand-coded, not learned.
+struct DataUplink
+{
+    Ptr<NetDevice> dev;
+    Address peer;
+    uint32_t port{0};
+};
+
 // State that lives across a single runScenario() pass. A pointer to the active
 // pass's state is stashed in g_active so static trampolines (bound into ns-3
 // callbacks) can reach it without per-callback captures.
@@ -154,6 +179,7 @@ struct PassState
 {
     std::map<int, std::vector<OffsetSample>> traj;
     std::vector<syncsim::GptpEntity*> ent; // indexed by node id
+    std::map<int, DataUplink> uplink;      // S5: nodeId -> its data uplink toward coreClient
     uint64_t dataOffered{0};               // frames injected by the 3 sources
     uint64_t dataDelivered{0};             // frames reaching the coreClient sink
     uint64_t bottleneckDrops{0};           // drops on swCore->coreClient queue
@@ -185,8 +211,14 @@ OffsetSink(int id, Time global, double offsetSec)
     g_active->traj[id].push_back({global.GetSeconds(), offsetSec * 1e6});
 }
 
-// Combined receive callback: dispatch by ethertype. gPTP -> the node's
-// GptpEntity; data -> counted at the coreClient sink (dropped otherwise).
+// Combined receive callback: dispatch by ethertype.
+//   gPTP  -> the node's GptpEntity (per-port termination, S4 -- NOT forwarded).
+//   data  -> at coreClient (the sink) counted as delivered; at a switch node,
+//            L2-forwarded hop-by-hop out that node's static data uplink toward
+//            coreClient (S5 real forwarding). This is the whole S5 fix: data
+//            genuinely traverses clientsX[0] -> swX -> swCore -> coreClient,
+//            enqueuing into (and, at the oversubscribed bottleneck, dropping
+//            from) each hop's real egress queue.
 bool
 CombinedRx(int nodeId,
            syncsim::GptpEntity* ent,
@@ -200,9 +232,21 @@ CombinedRx(int nodeId,
     {
         return ent->OnDeviceReceive(port, pkt, from);
     }
-    if (protocol == kDataProtocol && nodeId == CORECLIENT)
+    if (protocol == kDataProtocol)
     {
-        g_active->dataDelivered++;
+        if (nodeId == CORECLIENT)
+        {
+            g_active->dataDelivered++;
+            return true;
+        }
+        // Switch forwarding: send out this node's data uplink toward coreClient,
+        // unless the frame arrived on that uplink (loop guard; never happens in
+        // this tree, but keeps the static table honest).
+        auto it = g_active->uplink.find(nodeId);
+        if (it != g_active->uplink.end() && port != it->second.port)
+        {
+            it->second.dev->Send(pkt->Copy(), it->second.peer, kDataProtocol);
+        }
     }
     return true;
 }
@@ -248,8 +292,10 @@ SampleQueueLengths(Time interval, Time stopAt)
     Simulator::Schedule(interval, &SampleQueueLengths, interval, stopAt);
 }
 
-// One background source: inject a data frame on `dev` toward coreClient, then
-// reschedule after an exponential(mean) gap (seeded). Runs only in [start,stop].
+// One background source: ORIGINATE a data frame on `dev` (a source client's
+// uplink device) addressed to `peer` (its zone switch), then reschedule after an
+// exponential(mean) gap (seeded). Runs only in [start,stop]. From there the frame
+// is L2-forwarded hop-by-hop to coreClient by CombinedRx (S5 real forwarding).
 void
 DataSource(Ptr<NetDevice> dev,
            Address peer,
@@ -399,9 +445,15 @@ runScenario(bool background,
     NodeContainer nodes;
     nodes.Create(NNODES);
 
-    CsmaHelper csma;
-    csma.SetChannelAttribute("DataRate", StringValue("100Mbps"));
-    csma.SetChannelAttribute("Delay", TimeValue(MicroSeconds(1)));
+    // S5 fix: full-duplex point-to-point links via SimpleNetDevice/SimpleChannel
+    // (mainline ns-3.45). DataRate is a per-device attribute here (CSMA had it on
+    // the channel); Delay stays a channel attribute. Install(NodeContainer(a,b))
+    // makes exactly two devices on one fresh channel == a genuine full-duplex
+    // point-to-point link (each direction independent), matching CSMA's 100 Mbps /
+    // ~1 us so the timing-sensitive numbers stay comparable.
+    SimpleNetDeviceHelper simple;
+    simple.SetDeviceAttribute("DataRate", DataRateValue(DataRate("100Mbps")));
+    simple.SetChannelAttribute("Delay", TimeValue(MicroSeconds(1)));
 
     std::vector<std::unique_ptr<syncsim::Clock>> clocks(NNODES);
     std::vector<std::unique_ptr<syncsim::GptpEntity>> ent(NNODES);
@@ -418,44 +470,65 @@ runScenario(bool background,
     // INET-style module path (Nominal.<node>.eth<port>.macLayer.queue) for each,
     // for the Phase 4 scalar export -- port index = the gPTP port index, which
     // matches nominal.ned's port order (swCore: eth0=gm, eth1=coreClient, ...).
-    std::vector<Ptr<CsmaNetDevice>> switchDevs;
+    std::vector<Ptr<SimpleNetDevice>> switchDevs;
     std::vector<std::string> switchDevNames;
     auto qname = [&](int node, uint32_t port) {
         return "Nominal." + meta[node].name + ".eth" + std::to_string(port) + ".macLayer.queue";
     };
 
+    // A built link: the 2-device container plus the two AddPort'd port indices, so
+    // callers can register the endpoints in the S5 data-forwarding table.
+    struct LinkResult
+    {
+        NetDeviceContainer dv;
+        uint32_t pa;
+        uint32_t pb;
+    };
+
     // link a<->b; aIsMaster picks gPTP roles. aIsSwitch/bIsSwitch mark switch
-    // egresses (finite queue). Returns the device container for data wiring.
-    auto link = [&](int a, int b, bool aIsMaster, bool aIsSwitch, bool bIsSwitch) {
-        NetDeviceContainer dv = csma.Install(NodeContainer(nodes.Get(a), nodes.Get(b)));
+    // egresses (finite queue). Returns the devices + port indices for data wiring.
+    auto link = [&](int a, int b, bool aIsMaster, bool aIsSwitch, bool bIsSwitch) -> LinkResult {
+        NetDeviceContainer dv = simple.Install(NodeContainer(nodes.Get(a), nodes.Get(b)));
         uint32_t pa = ent[a]->AddPort(dv.Get(0), dv.Get(1)->GetAddress(), aIsMaster);
         uint32_t pb = ent[b]->AddPort(dv.Get(1), dv.Get(0)->GetAddress(), !aIsMaster);
         dv.Get(0)->SetReceiveCallback(MakeBoundCallback(&CombinedRx, a, ent[a].get(), pa));
         dv.Get(1)->SetReceiveCallback(MakeBoundCallback(&CombinedRx, b, ent[b].get(), pb));
         if (aIsSwitch)
         {
-            switchDevs.push_back(DynamicCast<CsmaNetDevice>(dv.Get(0)));
+            switchDevs.push_back(DynamicCast<SimpleNetDevice>(dv.Get(0)));
             switchDevNames.push_back(qname(a, pa));
         }
         if (bIsSwitch)
         {
-            switchDevs.push_back(DynamicCast<CsmaNetDevice>(dv.Get(1)));
+            switchDevs.push_back(DynamicCast<SimpleNetDevice>(dv.Get(1)));
             switchDevNames.push_back(qname(b, pb));
         }
-        return dv;
+        return {dv, pa, pb};
     };
 
     link(GM, SWCORE, true, false, true);
-    NetDeviceContainer coreToCoreClient = link(SWCORE, CORECLIENT, true, true, false);
-    link(SWCORE, SWA, true, true, true);
-    link(SWCORE, SWB, true, true, true);
-    link(SWCORE, SWC, true, true, true);
+    LinkResult coreLink = link(SWCORE, CORECLIENT, true, true, false);
+    NetDeviceContainer coreToCoreClient = coreLink.dv;
+    // S5 forwarding table: swCore forwards data out its coreClient-facing egress.
+    state.uplink[SWCORE] = {coreToCoreClient.Get(0), coreToCoreClient.Get(1)->GetAddress(),
+                            coreLink.pa};
+    LinkResult coreToA = link(SWCORE, SWA, true, true, true);
+    LinkResult coreToB = link(SWCORE, SWB, true, true, true);
+    LinkResult coreToC = link(SWCORE, SWC, true, true, true);
+    // Each zone switch forwards data out its swCore-facing uplink (the b-side of
+    // the SWCORE<->SW* link, port pb).
+    state.uplink[SWA] = {coreToA.dv.Get(1), coreToA.dv.Get(0)->GetAddress(), coreToA.pb};
+    state.uplink[SWB] = {coreToB.dv.Get(1), coreToB.dv.Get(0)->GetAddress(), coreToB.pb};
+    state.uplink[SWC] = {coreToC.dv.Get(1), coreToC.dv.Get(0)->GetAddress(), coreToC.pb};
     int zoneSw[3] = {SWA, SWB, SWC};
     for (int z = 0; z < 3; ++z)
     {
         for (int i = 0; i < 4; ++i)
         {
-            link(zoneSw[z], 6 + z * 4 + i, true, true, false);
+            int clientId = 6 + z * 4 + i;
+            LinkResult cl = link(zoneSw[z], clientId, true, true, false);
+            // Client's uplink toward its zone switch -- used to ORIGINATE its flow.
+            state.uplink[clientId] = {cl.dv.Get(1), cl.dv.Get(0)->GetAddress(), cl.pb};
         }
     }
 
@@ -488,8 +561,7 @@ runScenario(bool background,
     state.qLenVal.assign(switchDevs.size(), {});
     // Bottleneck = swCore->coreClient egress queue: trace drops + sample backlog.
     Ptr<NetDevice> bottleneckDev = coreToCoreClient.Get(0); // swCore's side
-    Address coreClientPeer = coreToCoreClient.Get(1)->GetAddress();
-    state.bottleneckQueue = DynamicCast<CsmaNetDevice>(bottleneckDev)->GetQueue();
+    state.bottleneckQueue = DynamicCast<SimpleNetDevice>(bottleneckDev)->GetQueue();
     state.bottleneckQueue->TraceConnectWithoutContext("Drop", MakeCallback(&BottleneckDropTrace));
 
     // ---- Offset trajectories (every non-GM node) ----------------------------
@@ -508,16 +580,22 @@ runScenario(bool background,
     }
     Simulator::Schedule(syncInterval, &syncsim::GptpEntity::SendSync, ent[GM].get(), syncInterval);
 
-    // ---- Background data sources (S5: injected at the convergence egress) ---
+    // ---- Background data sources (S5: originated at clientsX[0], forwarded) --
+    // Three ~50 Mbps flows, one per zone, each ORIGINATING at that zone's first
+    // client (clientsA/B/C[0] = node ids 6/10/14) and L2-forwarded hop-by-hop up
+    // to coreClient, where they aggregate onto the single 100 Mbps bottleneck
+    // (~150-into-100 oversubscription) exactly as INET forwards them.
     std::vector<Ptr<ExponentialRandomVariable>> gaps;
     if (background)
     {
-        for (int s = 0; s < 3; ++s) // three ~50 Mbps flows onto the 100 Mbps link
+        const int srcClients[3] = {6, 10, 14}; // clientsA[0], clientsB[0], clientsC[0]
+        for (int s = 0; s < 3; ++s)
         {
             Ptr<ExponentialRandomVariable> g = CreateObject<ExponentialRandomVariable>();
             g->SetAttribute("Mean", DoubleValue(meanGapUs * 1e-6));
             gaps.push_back(g);
-            Simulator::Schedule(Seconds(bgStart), &DataSource, bottleneckDev, coreClientPeer, g,
+            const DataUplink& up = state.uplink[srcClients[s]];
+            Simulator::Schedule(Seconds(bgStart), &DataSource, up.dev, up.peer, g,
                                 Seconds(simTime));
         }
         Simulator::Schedule(Seconds(bgStart), &SampleBacklog, MilliSeconds(1), Seconds(simTime));
@@ -532,14 +610,18 @@ runScenario(bool background,
                             Seconds(simTime));
     }
 
-    // P2c: opt-in pcap on every CSMA device (gPTP + data path), congested pass
-    // only. Off by default (empty prefix) so gates/stdout are unchanged. Reuses
-    // Phase 0's EnablePcapAll mechanism; captures this project's own GptpHeader
-    // wire format (verify with ns3/scripts/check_pcap_gptp.py -- NOT
-    // Wireshark-dissectable 802.1AS, which needs the IEEE TLV format = Tier 3).
+    // P2c pcap: REGRESSED by the S5 transport swap (disclosed, not hidden).
+    // ns-3.45's SimpleNetDeviceHelper is not a PcapHelperForDevice -- it has no
+    // EnablePcap/EnablePcapAll (verified in the pinned tree), unlike CsmaHelper.
+    // The P3a spike predicted exactly this. Rather than silently drop --pcapPrefix,
+    // we honor the flag as a no-op and say so. Restoring capture needs a manual
+    // per-device PcapWriter on the SimpleNetDevice Phy trace (a follow-up gap; see
+    // congestion/README.md and ns3/OBSERVABILITY.md).
     if (background && !g_pcapPrefix.empty())
     {
-        csma.EnablePcapAll(g_pcapPrefix, false);
+        std::cerr << "[congestion] WARN: --pcapPrefix is a no-op under the S5 full-duplex "
+                     "SimpleNetDevice transport (no EnablePcap on SimpleNetDeviceHelper). "
+                     "See README's 'pcap' note.\n";
     }
 
     Simulator::Stop(Seconds(simTime));
@@ -595,8 +677,8 @@ main(int argc, char* argv[])
                  "schema, congested pass) for scripts/analyze.py; empty = skip (default)",
                  resultDir);
     cmd.AddValue("pcapPrefix",
-                 "P2c: enable pcap capture on every CSMA device (gPTP + data path, "
-                 "congested pass) with this file prefix; empty = off (default)",
+                 "P2c pcap prefix (REGRESSED by the S5 SimpleNetDevice transport swap -- "
+                 "SimpleNetDeviceHelper has no EnablePcap; now a warned no-op, see README)",
                  g_pcapPrefix);
     cmd.Parse(argc, argv);
 

@@ -22,9 +22,11 @@ logic in `analyze.py` are **untouched**.
   discovery fallback.
 - **`ns3/scripts/run_sweep.sh`** (new) — the ns-3 analog of
   `scripts/run_sweep.sh` + `simulations/sweep.ini`'s `${cap = 5, 20, 80}`.
-- **`--pcapPrefix` (P2c)** — a second additive, off-by-default CommandLine arg on
-  the same three drivers, enabling own-format pcap capture, with
-  `ns3/scripts/check_pcap_gptp.py` to verify it (see the pcap section below).
+- **`--pcapPrefix` (P2c)** — a second additive, off-by-default CommandLine arg
+  enabling own-format pcap capture, with `ns3/scripts/check_pcap_gptp.py` to verify
+  it. **P3a note:** now works on `nominal` only; regressed to a warned no-op on
+  `congestion`/`feedback` after their S5 transport swap to `SimpleNetDevice` (no
+  `EnablePcap` on `SimpleNetDeviceHelper`) — see the pcap section below.
 - **Default sim-time normalized to 60 s (P2d)** — the three scenarios now default
   to OMNeT++'s `sim-time-limit = 60s` (was 20–30 s), overridable via `--simTime`.
   Peaks (transient) are unchanged; time-scaled counts (servo n, drop totals,
@@ -196,14 +198,27 @@ operates on the same exported vectors (shown inline above).
 
 ## pcap capture + verification (P2c)
 
-`nominal/congestion/feedback-topology.cc` each take a `--pcapPrefix=<prefix>`
-CommandLine arg that enables `CsmaHelper::EnablePcapAll` on every CSMA device
-(Phase 0's proven mechanism), writing one `<prefix>-<node>-<dev>.pcap` per device
-— capturing both the gPTP frames and, on congestion/feedback's bottleneck link,
-the background data. It is **opt-in and off by default**: with no `--pcapPrefix`
-no files are written and stdout / every gate is byte-for-byte unchanged (verified
-— capture only attaches trace sinks; congestion/feedback capture the
-congested/bursts pass only). Same additive discipline as `--resultDir`.
+> **P3a regression note (disclosed):** the S5 real-forwarding fix swapped
+> `congestion-topology.cc` and `feedback-topology.cc` from CSMA to full-duplex
+> `SimpleNetDevice`/`SimpleChannel`. `SimpleNetDeviceHelper` is **not** a
+> `PcapHelperForDevice` (no `EnablePcap`/`EnablePcapAll`), so **pcap capture no
+> longer works on those two scenarios** — their `--pcapPrefix` is now a warned
+> no-op. `nominal-topology.cc` / `gptp-spike.cc` keep CSMA and full pcap. Restoring
+> congestion/feedback capture needs a manual per-device Phy-trace `PcapWriter`
+> (a bounded but non-trivial **known follow-up gap**). Data-plane observability on
+> those scenarios remains via `analyze.py`'s per-queue Mbps/pps/drop summary (which
+> now shows the real per-hop forwarding) and the P1b `queueLength:vector` backlog
+> export. The section below describes pcap as it still works on `nominal`.
+
+`nominal-topology.cc` takes a `--pcapPrefix=<prefix>` CommandLine arg that enables
+`CsmaHelper::EnablePcapAll` on every CSMA device (Phase 0's proven mechanism),
+writing one `<prefix>-<node>-<dev>.pcap` per device capturing the gPTP frames. It is
+**opt-in and off by default**: with no `--pcapPrefix` no files are written and
+stdout / every gate is byte-for-byte unchanged (verified — capture only attaches
+trace sinks). Same additive discipline as `--resultDir`. (The
+`congestion`/`feedback` example below predates the P3a transport swap and is
+retained for the verifier's format illustration; those scenarios no longer emit
+pcap — see the regression note above.)
 
 **Verification** — `ns3/scripts/check_pcap_gptp.py <dir-or-pcap …>` is a
 dependency-free classic-pcap parser (no scapy) that proves a capture is genuine,
