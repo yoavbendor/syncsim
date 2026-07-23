@@ -42,7 +42,7 @@ treatment:
 | ID | Item | Kind | Root cause | Changes result *shape*, or just precision? | Tier |
 |---|---|---|---|---|---|
 | S1 | Coarser timestamps (send-scheduled/receive-callback vs. INET's streaming-PHY SFD signals) | Precision-only | ns-3 has no native SFD hook; `PhyTxBegin`/`PhyRxBegin` traces exist but aren't used yet | Precision only — delay is real, positive, stable | 2 |
-| S2 | 1-step Pdelay/Sync (no `Pdelay_Resp_Follow_Up`/`Follow_Up`) | Precision-only | Simplicity; informationally identical to 2-step | Neither | 2 |
+| S2 | 1-step Pdelay/Sync — ✅ **DONE (P2b)**: real 2-step (`Pdelay_Resp`+`Pdelay_Resp_Follow_Up`, `Sync`+`Follow_Up`) | Precision-only* | ~~Simplicity~~ implemented P2b | *Informationally identical where loss is negligible (Gate2/M2/M4 ≤1 ns); under M3's heavy loss the extra frame/cycle really does move the peak (510→429 µs) + servo count (170→90), a faithful 2-step loss property, isolation shape intact | 2 |
 | S3 | `neighborRateRatio = 1` — ✅ **DONE (P2a)**: now derived per link, folded into peer-delay + residence math | Precision-only | ~~Not implemented~~ implemented P2a | Precision only — confirmed empirically (≤ 2 ns transient effect, steady state unchanged) | 2 |
 | S4 | Per-port gPTP termination, no transparent bridging | *Not a gap* | Deliberate — real 802.1AS gPTP uses a non-forwarded reserved multicast | N/A — arguably more correct than a transparent bridge | — |
 | **S5** | **Background congestion traffic injected at the bottleneck egress, not truly forwarded hop-by-hop** | **Shape-level, real root cause** | **Mainline ns-3's `CsmaChannel` is half-duplex shared-medium; a real forwarding attempt spuriously coupled every node's sync (confirmed empirically)** | **Shape — a real topological difference from INET** | 3 |
@@ -218,22 +218,47 @@ same rate. S3's own documentation already established the omitted term is
 sub-picosecond at this project's drift magnitudes — protocol completeness, not an
 expected change to any result. Confirmed empirically above.
 
-### P2b — Real 2-step Pdelay/Sync framing (closes S2)
+### P2b — Real 2-step Pdelay/Sync framing (closes S2) — ✅ **DONE**
 
-Split `Pdelay_Resp`/`Sync` into their real two-message form
-(`Pdelay_Resp`+`Pdelay_Resp_Follow_Up`, `Sync`+`Follow_Up`), tracking pending
-state between the two messages in `GptpEntity`. More implementation surface
-than P2a (new message types, split handler state machines, more failure
-modes to reason about), and — like S2's own documentation already states —
-**informationally identical** to the 1-step version. Its real value is
-**synergy with P2c**: real hardware/`ptp4l` captures are always 2-step, so if
-the goal of adding pcap capture is ever "compare against a real capture,"
-1-step framing defeats that comparison regardless of anything else done.
+**Status (done):** `Pdelay_Resp`/`Sync` are split into their real two-message
+form — `Pdelay_Resp` (t2 only) + `Pdelay_Resp_Follow_Up` (t3), and a bare `Sync`
+marker + `Follow_Up` (preciseOriginTimestamp + correctionField). New
+`GptpMsgType` entries (`PdelayRespFollowUp=3`, `FollowUp=4`); the requester holds
+per-port pending state (t2, t4) between Resp and its Follow_Up, and the slave
+holds pending state (syncRxLocal, seq) between the bare Sync and its Follow_Up.
+Re-vendored byte-identical across all four scenario dirs; `gptp.h`'s S2 header
+block updated to closed.
 
-**Gate:** re-run every gPTP-dependent scenario; final/peak offsets and servo
-correction counts match the 1-step version's results (empirically
-demonstrating the "informationally identical" claim, not just asserting it
-from the design).
+**Result — verified empirically, NOT just asserted (this is exactly what the
+gate asked for):** informationally identical in the lossless / light-loss
+scenarios, with one honest, well-understood exception under heavy loss:
+
+- **Gate 2 (gptp-spike):** all PASS. Peaks ≤ 1 ns (`client2 57.177 → 57.178 µs`),
+  finals `0.000`, servo counts identical (159). Trajectory-table *row selection*
+  shifts (the offset trace fires at `Follow_Up` receipt, not `Sync` receipt) but
+  the underlying convergence is bit-identical.
+- **M2 (nominal):** all PASS. Only hop-3 leaf peaks shifted ≤ 1 ns (the extra
+  frame/cycle); finals `0.000`, servo counts 239, gate unchanged.
+- **M4 (feedback):** all PASS. `coreClient` delta `0.695 µs` (= the P1a value to
+  3 sig figs), still the sole non-zero node, "COUPLING OBSERVED" unchanged.
+- **M3 (congestion) — the honest exception:** all PASS and **isolation shape
+  EXACT** (16/17 nodes ratio 1.0x), but the headline numbers *do* move:
+  `coreClient` congested peak **510.473 → 429.207 µs** (21.2x → 17.8x) and servo
+  count **170 → 90**. This is **not** informational identity — and it is **not a
+  bug**. It is a real property of 2-step: each cycle now needs BOTH the bare Sync
+  and its Follow_Up to survive the ~33%-drop bottleneck queue, so surviving
+  corrections roughly halve, and because the worst-delayed Syncs are the ones
+  most likely to lose their partner Follow_Up, the *surviving* peak is lower. Real
+  `ptp4l`/hardware 2-step behaves exactly this way under loss; the 1-step form was
+  simply more loss-robust by carrying everything in one frame. The M3 *finding*
+  (only the shared-queue node degrades), the drop/backlog regime, and the gate are
+  all unchanged. Reported as data, per the project standard, not forced back.
+
+All four scenarios deterministic (run-to-run byte-identical, twice each); the
+CSV-export/`analyze.py --strict` path still passes on the P2b build. So S2's
+"informationally identical" claim holds wherever loss is negligible, and P2b
+additionally surfaced *where* it does not — a result only visible by verifying
+empirically, exactly as the plan required.
 
 ### P2c — pcap capture on the gPTP + data path
 
@@ -330,7 +355,7 @@ part of this plan.
 | P1a servo hardening | 1 wk | Medium — touches vendored `gptp.cc` everywhere, full regression required | **Yes** — the point of this phase |
 | P1b `queueLength:vector` | 2–3 days | Low | No — unblocks existing, already-scaffolded plots |
 | P2a rate-ratio | 2–3 days | Low | No — already proven negligible |
-| P2b 2-step framing | 1 wk | Low–medium (new state machine surface) | No — must prove this empirically |
+| P2b 2-step framing | 1 wk | Low–medium (new state machine surface) | **Mostly no, but proven empirically NOT to be free**: identical to ≤1 ns in Gate2/M2/M4; under M3's heavy loss it genuinely shifts the peak (510→429 µs) + servo count (170→90) — a faithful 2-step loss property, isolation intact |
 | P2c pcap capture | 3–5 days | Low — reuses Phase 0's proven mechanism | No |
 | P2d sim-time normalization | trivial | None | No |
 | P3a S5 feasibility spike | 1 wk (spike only) | Unknown until spiked — that's the point | TBD, gated on the spike's own answer |

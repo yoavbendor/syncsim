@@ -48,18 +48,21 @@ Topology — identical shape to `simulations/minimal.ned` and Phase 0's
   sw.port2 <-> client2 : MASTER      (sw is slave AND master, like a real bridge)
 ```
 
-1. **Peer delay** (per link, 1-step): each slave port sends `Pdelay_Req` at t1;
-   the responder returns a `Pdelay_Resp` carrying its rx (t2) and tx (t3)
-   timestamps; the requester computes
+1. **Peer delay** (per link, 2-step as of P2b): each slave port sends
+   `Pdelay_Req` at t1; the responder returns a `Pdelay_Resp` carrying its rx (t2),
+   then a `Pdelay_Resp_Follow_Up` carrying its tx (t3); the requester (holding
+   pending state between the two) computes
    `meanLinkDelay = ((t4 − t1) − (t3 − t2)) / 2`. Timestamps are read from the
    node's local `syncsim::Clock`.
-2. **Sync + residence-time correction**: `gm` (drift-free, so its local time is
-   global sim time) sends `Sync` carrying `preciseOriginTimestamp` and
-   `correctionField = 0`. `sw` receives it on its slave port, reconstructs GM
-   time as `origin + correction + peerDelay`, servos its own clock, and after a
-   residence delay **regenerates** `Sync` on both master ports with
-   `correctionField = upstreamCorrection + gm↔sw peerDelay + residenceTime`. Each
-   client reconstructs `origin + correction + sw↔client peerDelay` and servos.
+2. **Sync + residence-time correction** (2-step as of P2b): `gm` (drift-free, so
+   its local time is global sim time) sends a bare `Sync` marker followed by a
+   `Follow_Up` carrying `preciseOriginTimestamp` and `correctionField = 0`. `sw`
+   records the bare `Sync`'s arrival, and on the `Follow_Up` reconstructs GM time
+   as `origin + correction + peerDelay`, servos its own clock, and after a
+   residence delay **regenerates** a bare `Sync` + `Follow_Up` on both master
+   ports with `correctionField = upstreamCorrection + gm↔sw peerDelay +
+   residenceTime`. Each client reconstructs `origin + correction + sw↔client
+   peerDelay` and servos.
 3. **Servo (hardened, P1a)**: on every `Sync`, `offset = localTime −
    reconstructedGmTime` drives a **PI control loop** — a damped **proportional
    phase** term (`Clock::AdjustOffset`, gain 0.7) plus a **bounded, low-pass
@@ -95,9 +98,12 @@ like an unresolvable slave/master ordering problem dissolves.
   receive callback fires at end-of-reception, so a measured link delay folds in
   one frame serialization time on top of channel propagation — real, positive,
   stable, which is all Gate 2 asks.
-- **S2 — 1-step variants.** `Pdelay_Resp` carries (t2, t3) directly (vs 2-step
-  `Pdelay_Resp` + `Pdelay_Resp_Follow_Up`); `Sync` carries origin + correction
-  directly (vs `Sync` + `Follow_Up`). Same information, fewer frames.
+- **S2 — 2-step framing — CLOSED (P2b).** Formerly 1-step. Now split into the
+  real two-message form: `Pdelay_Resp` (t2 only) + `Pdelay_Resp_Follow_Up` (t3),
+  and a bare `Sync` marker + `Follow_Up` (preciseOriginTimestamp + correction).
+  Requester/slave hold pending state between each pair. Verified informationally
+  identical to 1-step in lossless conditions (Gate 2/M2/M4 match to ≤ 1 ns); the
+  one honest exception is M3's heavy-loss regime — see `congestion/README.md`.
 - **S3 — neighborRateRatio — CLOSED (P2a).** Formerly assumed = 1. Now derived
   per link from two successive Pdelay exchanges (`neighborRateRatio =
   (t3_now − t3_prev) / (t4_now − t4_prev)` — neighbor-elapsed / local-elapsed)
@@ -115,7 +121,20 @@ like an unresolvable slave/master ordering problem dissolves.
 Message wire format is a pragmatic 19-byte custom `ns3::Header` (type + seq + two
 int64 femtosecond fields); no IEEE TLV fidelity or pcap for this scenario (Gate 2
 gates on convergence, not wire format — unlike Phase 0/real syncsim, which do
-care about pcap).
+care about pcap). **Two frames per Pdelay exchange and per Sync cycle as of P2b
+(2-step)** — the header is unchanged, only the message count grew.
+
+**2-step framing note (P2b — S2 closed).** Splitting `Pdelay_Resp` into
+`Pdelay_Resp` (t2) + `Pdelay_Resp_Follow_Up` (t3), and `Sync` into a bare marker
++ `Follow_Up` (origin + correction), left the Gate-2 numbers informationally
+identical: peaks moved ≤ 1 ns (`client2 57.177 → 57.178 µs`), every final is
+`0.000 µs`, and servo counts are unchanged at 159. (The downsampled trajectory
+table now prints slightly later global sample instants — the offset trace fires
+at `Follow_Up` receipt rather than `Sync` receipt — but the underlying
+convergence is bit-identical, all `0.0000` from ~2 s on.) This empirically
+confirms S2's "informationally identical" claim for the lossless case; the one
+regime where 2-step genuinely differs is M3's heavy-loss queue
+(`congestion/README.md`).
 
 ## Gate 2 result — **PASSED** (sandbox, ns-3.45, release build, asserts on)
 

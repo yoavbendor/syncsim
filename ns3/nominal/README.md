@@ -113,22 +113,22 @@ peer-delay interval 0.05 s.
            node | hops |   ppm |  peak us | final us | servos
   --------------------------------------------------------------
          swCore |  1   |  50.0 |    7.975 |    0.000 | 239
-     coreClient |  2   | 150.0 |   24.075 |    0.000 | 239
-            swA |  2   |  80.0 |   12.700 |    0.000 | 239
+     coreClient |  2   | 150.0 |   24.076 |    0.000 | 239
+            swA |  2   |  80.0 |   12.701 |    0.000 | 239
             swB |  2   | −60.0 |   10.050 |    0.000 | 239
-            swC |  2   | 100.0 |   15.950 |    0.000 | 239
-    clientsA[0] |  3   | 126.6 |   20.126 |    0.000 | 239
+            swC |  2   | 100.0 |   15.951 |    0.000 | 239
+    clientsA[0] |  3   | 126.6 |   20.127 |    0.000 | 239
     clientsA[1] |  3   |  42.7 |    6.495 |    0.000 | 239
-    clientsA[2] |  3   |  −1.8 |    1.723 |    0.000 | 239
-    clientsA[3] |  3   | −47.4 |    8.148 |    0.000 | 239
+    clientsA[2] |  3   |  −1.8 |    1.722 |    0.000 | 239
+    clientsA[3] |  3   | −47.4 |    8.147 |    0.000 | 239
     clientsB[0] |  3   | −52.4 |    8.961 |    0.000 | 239
     clientsB[1] |  3   | 122.6 |   19.482 |    0.000 | 239
-    clientsB[2] |  3   |−159.6 |   26.394 |    0.000 | 239
-    clientsB[3] |  3   |  33.9 |    5.063 |    0.000 | 239
-    clientsC[0] |  3   | 175.6 |   28.089 |    0.000 | 239
+    clientsB[2] |  3   |−159.6 |   26.395 |    0.000 | 239
+    clientsB[3] |  3   |  33.9 |    5.062 |    0.000 | 239
+    clientsC[0] |  3   | 175.6 |   28.090 |    0.000 | 239
     clientsC[1] |  3   |  50.4 |    7.747 |    0.000 | 239
-    clientsC[2] |  3   | 128.8 |   20.478 |    0.000 | 239
-    clientsC[3] |  3   |  23.7 |    3.403 |    0.000 | 239
+    clientsC[2] |  3   | 128.8 |   20.479 |    0.000 | 239
+    clientsC[3] |  3   |  23.7 |    3.402 |    0.000 | 239
 ```
 
 **Every one of the 18 nodes converges to 0.000 µs final and holds** (well under
@@ -137,7 +137,7 @@ the 2 µs tolerance), across all three hop depths. That is the gate. (Peaks are
 the hardened servo's **damped** proportional phase, gain 0.7, takes ~2 Sync
 cycles rather than 1 to settle the startup transient; `final` and the gate are
 unchanged. See `gptp/README.md`'s servo-change note. `clientsA[2]` at −1.8 ppm is
-unchanged at 1.723 µs — its peak is set by first-Sync latency, not the servo gain,
+unchanged at 1.722 µs — its peak is set by first-Sync latency, not the servo gain,
 so the damping does not touch it.)
 
 ### Peak grouped by hop depth (INET's own reporting shape)
@@ -146,8 +146,8 @@ so the damping does not touch it.)
   hops | nodes | mean peak us | max peak us
   -------------------------------------------
      1 |   1   |     7.975    |    7.975
-     2 |   4   |    15.694    |   24.075
-     3 |  12   |    13.009    |   28.089
+     2 |   4   |    15.694    |   24.076
+     3 |  12   |    13.009    |   28.090
   INET M2 reference (orientation only): hops=1 ~7.36; hops=2 mean 12.19 max 18.75;
                                         hops=3 mean 8.40 max 17.90 us
 ```
@@ -183,16 +183,18 @@ coarser S1 timestamping) — but per the POC plan the gate is the **mechanism**
 unbounded compounding with depth), not the digits. That mechanism reproduces
 faithfully.
 
-**S3 note (closed by P2a).** `neighborRateRatio` is now derived per link from
-consecutive Pdelay exchanges and folded into the peer-delay and residence-time
-math (was assumed = 1). As S3 always predicted, this moved essentially nothing:
-a handful of **transient-peak** values shifted by **≤ 1 ns** (the last printed
-digit — e.g. `coreClient` peak `24.075 → 24.076 µs`, hops=2 max `24.075 →
-24.076`) and every node's **final** offset is unchanged at `0.000 µs`. The
-reason is physical: the servo steers each local clock's *rate* to match GM, so
-post-lock the measured `neighborRateRatio` converges to ~1 (< 0.5 ppb residual)
-— the fold only bites during the brief pre-lock transient, where residence is
-scaled by the instantaneous relative drift, hence the ≤ 1 ns peak shift. The M2
+**S3 note (closed by P2a) + S2 note (closed by P2b).** `neighborRateRatio` is now
+derived per link and folded into the peer-delay/residence math (P2a), and the
+Pdelay/Sync messages are now real 2-step (P2b). On M2 both are negligible: a
+handful of **transient-peak** values shifted by **≤ 1 ns** (last printed digit —
+e.g. `coreClient` peak `24.075 → 24.076 µs`; the hop-3 leaf peaks moved by ≤ 1 ns
+under P2b's extra frame/cycle), every node's **final** offset unchanged at
+`0.000 µs`, and all 239 servo counts unchanged. The reasons are physical: the
+servo steers each clock's *rate* to GM (so post-lock `neighborRateRatio` ≈ 1,
+< 0.5 ppb), and the 2-step bare Sync occupies the same wire slot as the old
+combined Sync with the residence correction self-compensating for the extra
+Sync→Follow_Up gap — so downstream offsets are preserved. (M3's heavy-loss queue
+is the one place 2-step genuinely differs; see `congestion/README.md`.) The M2
 gate is unchanged (all 18 nodes converge, all PASS).
 
 ## What this does and does not establish
@@ -207,8 +209,9 @@ gate is unchanged (all 18 nodes converge, all PASS).
 - **Does not (deferred):** data-plane congestion coupling (M3/M4 — this run has
   no background/burst traffic and no finite-queue contention),
   streaming-PHY-grade timestamps (S1), IEEE TLV wire format / pcap. Carries
-  forward S1/S2/S4 unchanged; **S3 (`neighborRateRatio`) is closed by P2a**
-  (see the S3 note above — protocol completeness, ≤ 1 ns transient effect).
+  forward S1/S4 unchanged; **S2 (2-step framing) is closed by P2b** and **S3
+  (`neighborRateRatio`) is closed by P2a** (see the S2/S3 note above — both
+  ≤ 1 ns on M2).
 
 ### Honest licensing note
 

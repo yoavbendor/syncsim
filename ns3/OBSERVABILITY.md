@@ -136,28 +136,34 @@ driver's own in-binary report — cross-tool agreement, off the exported CSV.
 
 ### congestion (M3) — exit 0, PASS
 
-`coreClient` degrades (peak **510.47 µs** after P1a's servo/peer-delay
-hardening — was 46,281 µs), while all 16 other nodes hold their baseline — the
-isolation signature, visible in the offset table, the new backlog vector, and the
-queue summary. The bottleneck `Nominal.swCore.eth1.macLayer.queue` shows 139.86
-Mbps offered, 326,020 ppm (32.6 %) drop, and a `queueLength:vector` backlog that
-sits at max 10 / mean 8.50 packets (P1b); every other queue carries only gPTP,
-drops nothing, and stays near-empty.
+`coreClient` degrades (peak **429.21 µs** after P1a's servo/peer-delay hardening
++ P2b's 2-step framing — was 510.47 µs under 1-step, 46,281 µs pre-P1a; see
+`congestion/README.md` for why 2-step lowers the surviving peak under heavy loss),
+while all 16 other nodes hold their baseline — the isolation signature, visible in
+the offset table, the new backlog vector, and the queue summary. The bottleneck
+`Nominal.swCore.eth1.macLayer.queue` shows 139.88 Mbps offered, 326,573 ppm
+(32.7 %) drop, and a `queueLength:vector` backlog that sits at max 10 / mean 8.51
+packets (P1b); every other queue carries only gPTP, drops nothing, and stays
+near-empty.
 
 ```
-  Nominal.coreClient.clock       final=   -85.11us  peak=   510.47us  n=  170  hops=2
+  Nominal.coreClient.clock       final=  +110.24us  peak=   429.21us  n=   90  hops=2
   (all other nodes: peak 1.72 .. 28.09us, unchanged from nominal baseline)
 [analyze] peak |offset| by time window (4 x 7.5s, in us):
-  Nominal.coreClient.clock          510.47   327.57   377.58   216.50
+  Nominal.coreClient.clock          429.21   212.76   256.24   221.84
   (every other node: convergence in w0, then 0.00)
 [analyze] sanity check: PASS -- gPTP produced the expected, finite, bounded signals.
 [analyze] egress queue backlog (packets):
-  Nominal.swCore.eth1.macLayer.queue  max=   10  mean=  8.50
+  Nominal.swCore.eth1.macLayer.queue  max=   10  mean=  8.51
 [analyze] data-plane congestion summary (offered load, 30s window):
-  Nominal.swCore.eth1.macLayer.queue    139.86 Mbps    18161.9 pps  drop=  326020.1 ppm
+  Nominal.swCore.eth1.macLayer.queue    139.88 Mbps    18189.7 pps  drop=  326572.5 ppm
   Nominal.swCore.eth0.macLayer.queue      0.01 Mbps       20.0 pps  drop=       0.0 ppm
   (... all other egress queues: ~0.01 Mbps, 0.0 ppm drop ...)
 ```
+
+(`coreClient`'s servo count dropping to `n=90` under load is P2b's honest 2-step
+finding: a cycle now needs both its `Sync` and its `Follow_Up` to survive the
+bottleneck queue, roughly halving surviving corrections vs the 1-step `n=170`.)
 
 ### feedback (M4) — exit 0, PASS
 

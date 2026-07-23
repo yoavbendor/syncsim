@@ -24,7 +24,7 @@ implement the mechanism faithfully and **report whatever the run actually shows,
 honestly**. A faithful non-finding is as valid as a finding.
 
 **Our result (updated by P1a): coupling is now measurable but sub-microsecond and
-localized to the single shared-queue node (`coreClient`, 0.694 µs); all 16 other
+localized to the single shared-queue node (`coreClient`, 0.695 µs); all 16 other
 nodes see exactly zero. The physical conclusion still matches INET — aligned
 microbursts do not meaningfully degrade sync — but the hardened servo surfaces the
 genuine M3-mechanism signal that the Phase-2 servo buried at ~77 ns. Reported
@@ -75,11 +75,15 @@ emergent alignment M4 is about.
   queue — the microburst regime `feedback.ini` describes (a single synchronized
   instant's packet count exceeding queue depth, independent of sustained
   bandwidth).
-- **S1/S2/S4** from Phase 2 carried forward unchanged; **S3
-  (`neighborRateRatio`) closed by P2a** — folded into the peer-delay/residence
-  math, its only effect here a ≤ 1 ns shift on a handful of steady-window peaks
-  (`coreClient` delta `0.695 → 0.694 µs`; still the sole non-zero node, still
-  above the 0.5 µs tolerance, so the "COUPLING OBSERVED" label is unchanged).
+- **S1/S4** from Phase 2 carried forward unchanged. **S3 (`neighborRateRatio`)
+  closed by P2a** and **S2 (2-step framing) closed by P2b** — folded into /
+  reframed the same peer-delay/Sync path. Their combined effect on M4 is
+  negligible: a handful of steady-window peaks shifted by ≤ 1 ns (last printed
+  digit), `coreClient`'s delta is `0.695 µs` (unchanged from P1a to 3 sig figs),
+  still the sole non-zero node, still above the 0.5 µs tolerance — so the
+  "COUPLING OBSERVED" label is unchanged. Unlike M3 (where 2-step's extra
+  frame-per-cycle bites under heavy loss), M4's light, bursty loss leaves the
+  2-step numbers essentially identical to 1-step.
 
 ## Why gptp/clock are vendored here
 
@@ -125,7 +129,7 @@ settles to ~µs.)
 ```
   frames offered  : 52380 (15 frags x 12 clients x cycles)
   delivered       : 6093
-  dropped         : 46324 (88.38% of offered-into-queue)
+  dropped         : 46382 (88.39% of offered-into-queue)
   queue backlog   : mean 0.33/20, max 20/20
 ```
 
@@ -150,13 +154,13 @@ is the honest coupling measure:
            node | hops |   ppm |  base peak |  burst peak |  delta us
   --------------------------------------------------------------------
          swCore |  1   |  50.0 |    0.266   |    0.266    |   0.000
-     coreClient |  2   | 150.0 |    0.910   |    1.604    |   0.694   <-- only non-zero
+     coreClient |  2   | 150.0 |    0.910   |    1.605    |   0.695   <-- only non-zero
             swA |  2   |  80.0 |    0.426   |    0.426    |   0.000
-            swB |  2   | -60.0 |    0.320   |    0.320    |   0.000
+            swB |  2   | -60.0 |    0.321   |    0.321    |   0.000
             swC |  2   | 100.0 |    0.538   |    0.538    |   0.000
-    clientsA[0] |  3   | 126.6 |    0.749   |    0.749    |   0.000
-    clientsA[1] |  3   |  42.7 |    0.227   |    0.227    |   0.000
-    clientsA[2] |  3   |  -1.8 |    0.009   |    0.009    |   0.000
+    clientsA[0] |  3   | 126.6 |    0.748   |    0.748    |   0.000
+    clientsA[1] |  3   |  42.7 |    0.228   |    0.228    |   0.000
+    clientsA[2] |  3   |  -1.8 |    0.010   |    0.010    |   0.000
     clientsA[3] |  3   | -47.4 |    0.252   |    0.252    |   0.000
     clientsB[0] |  3   | -52.4 |    0.279   |    0.279    |   0.000
     clientsB[1] |  3   | 122.6 |    0.717   |    0.717    |   0.000
@@ -164,7 +168,7 @@ is the honest coupling measure:
     clientsB[3] |  3   |  33.9 |    0.180   |    0.180    |   0.000
     clientsC[0] |  3   | 175.6 |    1.002   |    1.002    |   0.000
     clientsC[1] |  3   |  50.4 |    0.269   |    0.269    |   0.000
-    clientsC[2] |  3   | 128.8 |    0.763   |    0.763    |   0.000
+    clientsC[2] |  3   | 128.8 |    0.764   |    0.764    |   0.000
     clientsC[3] |  3   |  23.7 |    0.126   |    0.126    |   0.000
 ```
 
@@ -180,8 +184,8 @@ exactly 0.000 — is unchanged.)
 **Localized, sub-microsecond coupling — the M3 mechanism, now above the noise
 floor.** After P1a's servo/peer-delay hardening, `coreClient` — the **one** node
 whose gPTP path shares the congested egress queue — shows a steady-window delta of
-**0.694 µs** (`0.910 → 1.604 µs`), while **all 16 other nodes are exactly 0.000**.
-Because 0.694 µs exceeds the scenario's 0.5 µs `couplingTolUs` tolerance, the driver
+**0.695 µs** (`0.910 → 1.605 µs`), while **all 16 other nodes are exactly 0.000**.
+Because 0.695 µs exceeds the scenario's 0.5 µs `couplingTolUs` tolerance, the driver
 now prints **"COUPLING OBSERVED"** where the Phase-2 servo reported a sub-`0.5 µs`
 non-finding (the old delta was ~77 ns).
 
@@ -195,7 +199,7 @@ masked the clean signal; the hardened loop surfaces the genuine ~0.7 µs effect.
 the task's guidance this is reported honestly, not forced back to the old label.
 
 **What it does *not* change:** the physical conclusion is the same as INET's — aligned
-microbursts do **not** meaningfully degrade sync. 0.694 µs, localized to one node, is
+microbursts do **not** meaningfully degrade sync. 0.695 µs, localized to one node, is
 far below any sync-relevant threshold; the other 16 nodes see **zero** coupling. M3
 and M4 remain the *same mechanism* at two operating points: M3's tiny cap-10 queue +
 sustained oversubscription drives `coreClient` to a 510 µs congested peak; M4's cap-20
@@ -226,7 +230,8 @@ result is reported as data, per `feedback.ini`'s own standard.
   localization mechanism confirmed present-but-negligible (~77 ns) at `coreClient`.
 - **Does not (deferred / simplified):** perfect `scheduleForAbsoluteTime`
   re-anchoring (S6), hop-by-hop L2 forwarding (S5), IEEE TLV wire format / pcap.
-  Carries S1/S2/S4 forward unchanged; **S3 (`neighborRateRatio`) closed by P2a**.
+  Carries S1/S4 forward unchanged; **S2 (2-step framing) closed by P2b** and
+  **S3 (`neighborRateRatio`) closed by P2a** (both negligible on M4 — ≤ 1 ns).
 
 ### Honest licensing note
 

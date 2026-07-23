@@ -53,16 +53,21 @@ missed servo cycle). Every other switch egress carries only negligible gPTP, nev
 fills, and those nodes are untouched. **The asymmetry emerges from the shared-queue
 mechanism — it is not hand-coded per node.**
 
-## Simplifications (Phase-2's S1/S2/S4 carried forward; S3 closed by P2a)
+## Simplifications (Phase-2's S1/S4 carried forward; S2 closed by P2b, S3 by P2a)
 
 **S3 (`neighborRateRatio`) is closed as of P2a** — derived per link from
 consecutive Pdelay exchanges and folded into the peer-delay/residence math. Its
-only effect here was a **+2 ns** shift in `coreClient`'s congested peak
-(`510.471 → 510.473 µs`) and ≤ 1 ns on a few baseline peaks (last printed digit);
-the isolation shape, the drop rate, the backlog, and every gate are unchanged.
-The peer-delay outlier filter (P1a) already guards `neighborRateRatio` too — the
-same congestion-inflated `t4` that the running-minimum rejects is rejected by
-P2a's `>1%`-off-unity ratio guard. S1/S2/S4 carry forward unchanged.
+only effect was a **≤ 2 ns** shift on peaks (last printed digit; measured in
+isolation on the 1-step build it moved the congested peak `510.471 → 510.473 µs`);
+the isolation shape, drop rate, backlog, and every gate are unchanged. The
+peer-delay outlier filter (P1a) already guards `neighborRateRatio` too — the same
+congestion-inflated `t4` the running-minimum rejects is rejected by P2a's
+`>1%`-off-unity ratio guard.
+
+**S2 (2-step framing) is closed as of P2b** — and, unlike S3, it *does* change
+this scenario's headline numbers (congested peak `510.473 → 429.207 µs`, servo
+count `170 → 90`), for a real, protocol-faithful loss-statistics reason detailed
+in "P2b genuinely changes this one scenario" below. S1/S4 carry forward unchanged.
 
 **S5 — background flows injected at their convergence egress.** The three flows
 are offered on `swCore`'s `coreClient`-facing device directly, rather than
@@ -100,14 +105,17 @@ offsets side by side, so the isolation is a direct within-binary comparison.
 
 ```
   data offered by 3 sources : 544018 pkts
-  delivered to coreClient   : 366574 pkts (95.66 Mbps, 12640 pps)
-  dropped at bottleneck     : 177634 pkts (32.64% of offered-into-queue)
-  queue backlog             : mean 8.82/10, max 10/10
+  delivered to coreClient   : 366550 pkts (95.66 Mbps, 12640 pps)
+  dropped at bottleneck     : 178208 pkts (32.71% of offered-into-queue)
+  queue backlog             : mean 8.81/10, max 10/10
 ```
 
-Compare INET's own M3 run (orientation only, **not** a match target): ~149 Mbps /
-~18,759 pps at the bottleneck, ~34% drop, mean backlog 9.23/10. Our drop rate
-(32.64%) and near-full backlog (8.82/10) reproduce the same regime. (Goodput
+(P2b 2-step framing added one extra gPTP frame per Sync cycle and per Pdelay
+exchange; against the ~150 Mbps data flood this barely moves the drop rate,
+32.64% → 32.71%.) Compare INET's own M3 run (orientation only, **not** a match
+target): ~149 Mbps / ~18,759 pps at the bottleneck, ~34% drop, mean backlog
+9.23/10. Our drop rate (32.71%) and near-full backlog (8.81/10) reproduce the
+same regime. (Goodput
 differs because our single 946 B frame size and injection point differ from INET's
 full multi-app IP path; the **drop fraction and backlog** — the congestion
 descriptors that matter — line up.)
@@ -118,38 +126,71 @@ descriptors that matter — line up.)
            node | hops |   ppm |  base peak |  cong peak |  ratio
   ----------------------------------------------------------------
          swCore |  1   |  50.0 |     7.975  |     7.975  |   1.0x
-     coreClient |  2   | 150.0 |    24.076  |   510.473  |  21.2x   <-- degrades
+     coreClient |  2   | 150.0 |    24.076  |   429.207  |  17.8x   <-- degrades
             swA |  2   |  80.0 |    12.701  |    12.701  |   1.0x
             swB |  2   | -60.0 |    10.050  |    10.050  |   1.0x
             swC |  2   | 100.0 |    15.951  |    15.951  |   1.0x
-    clientsA[0] |  3   | 126.6 |    20.126  |    20.126  |   1.0x
+    clientsA[0] |  3   | 126.6 |    20.127  |    20.127  |   1.0x
     clientsA[1] |  3   |  42.7 |     6.495  |     6.495  |   1.0x
     clientsA[2] |  3   |  -1.8 |     1.722  |     1.722  |   1.0x
-    clientsA[3] |  3   | -47.4 |     8.148  |     8.148  |   1.0x
+    clientsA[3] |  3   | -47.4 |     8.147  |     8.147  |   1.0x
     clientsB[0] |  3   | -52.4 |     8.961  |     8.961  |   1.0x
     clientsB[1] |  3   | 122.6 |    19.482  |    19.482  |   1.0x
-    clientsB[2] |  3   |-159.6 |    26.394  |    26.394  |   1.0x
-    clientsB[3] |  3   |  33.9 |     5.063  |     5.063  |   1.0x
-    clientsC[0] |  3   | 175.6 |    28.089  |    28.089  |   1.0x
+    clientsB[2] |  3   |-159.6 |    26.395  |    26.395  |   1.0x
+    clientsB[3] |  3   |  33.9 |     5.062  |     5.062  |   1.0x
+    clientsC[0] |  3   | 175.6 |    28.090  |    28.090  |   1.0x
     clientsC[1] |  3   |  50.4 |     7.747  |     7.747  |   1.0x
-    clientsC[2] |  3   | 128.8 |    20.478  |    20.478  |   1.0x
-    clientsC[3] |  3   |  23.7 |     3.403  |     3.403  |   1.0x
+    clientsC[2] |  3   | 128.8 |    20.479  |    20.479  |   1.0x
+    clientsC[3] |  3   |  23.7 |     3.402  |     3.402  |   1.0x
 ```
 
 **Every non-coreClient node's congested peak is byte-identical to its baseline
-(ratio exactly 1.0x)** — total isolation, unchanged by the P1a servo hardening.
-`coreClient` alone degrades, now by **21.2x** (was 2468x pre-P1a). `coreClient`'s
-servo corrections drop **239 → 170** under load: real Sync frames were
-dropped/starved from the congested queue.
+(ratio exactly 1.0x)** — total isolation, unchanged by P1a's servo hardening, by
+P2a's rate-ratio fold, and by P2b's 2-step framing. `coreClient` alone degrades,
+now by **17.8x** (429.207 µs; was 21.2x / 510.473 µs under 1-step, 2468x
+pre-P1a). `coreClient`'s servo corrections drop **239 → 90** under load: real
+Sync frames were dropped/starved from the congested queue.
 
-### On the magnitude (24.08 µs → 510.47 µs vs INET's 1949.64 µs) — **fixed by P1a**
+### P2b (2-step framing) genuinely changes this one scenario — an honest, verified finding
+
+The Tier-2 plan predicted 2-step framing would be *informationally identical* to
+1-step. **Verifying that empirically (not assuming it) showed it holds for every
+scenario except this one.** Gate 2, M2, and M4 came out identical to ≤ 1 ns; but
+M3's heavy-loss regime is the exception, and the reason is a real property of
+2-step, not a bug:
+
+- **1-step:** one Sync frame per cycle carries everything. A cycle survives if
+  that single frame survives the lossy bottleneck queue. Result: 170 surviving
+  corrections, congested peak **510.473 µs**.
+- **2-step:** each cycle is a bare `Sync` **plus** a `Follow_Up`, and the slave
+  can only use the cycle if **both** survive the queue. Under a ~33%-drop
+  bottleneck the paired-survival probability is roughly the square, so surviving
+  corrections roughly halve (**170 → 90**), and — because the *worst*-delayed
+  Syncs are exactly the ones whose partner `Follow_Up` is most likely to be
+  dropped — the surviving peak is **lower** (**510.473 → 429.207 µs**).
+
+This is faithful IEEE 802.1AS 2-step behavior: real hardware/`ptp4l` captures are
+always 2-step, and under loss they genuinely deliver fewer usable Sync cycles than
+a (non-standard) all-in-one-frame Sync would. The 1-step form was simply more
+loss-robust by construction. **What is unchanged:** the M3 *finding* — the
+isolation shape (all 16 other nodes still exactly 1.0x), the "only the
+shared-queue node degrades" conclusion, the drop rate/backlog regime, and the
+gate (coreClient clearly the one degraded node, 17.8x, still hundreds of µs, same
+order as INET's 1,949.64 µs). Only the one magnitude and the servo count moved,
+and both moved for a well-understood, protocol-faithful reason. Reported as data,
+per this project's standard, rather than forced back to the 1-step number.
+
+### On the magnitude (24.08 µs → 429.21 µs vs INET's 1949.64 µs) — **fixed by P1a; refined by P2b**
 
 Pre-P1a this congested peak was **46,280.929 µs** — a 24x outlier over INET's
 1,949.64 µs, the sole number the ns-3 track produced that was not trustworthy at
-face value (`NS3_PARITY_PLAN.md` Tier 1). **P1a fixes it: the congested peak is
-now 510.47 µs — below INET's 1,949.64 µs, the same order of magnitude, and it is
-the genuine congested-queue Sync-delay signal rather than a servo/measurement
-artifact.** The root cause and the fix, precisely:
+face value (`NS3_PARITY_PLAN.md` Tier 1). **P1a fixed it** (to **510.47 µs**
+under the then-current 1-step framing), and **P2b's 2-step framing refined it to
+429.21 µs** (for the loss-statistics reason in the section just above). Either way
+the peak is below INET's 1,949.64 µs, the same order of magnitude, and it is the
+genuine congested-queue Sync-delay signal rather than a servo/measurement
+artifact. The P1a root cause and fix, precisely (numbers quoted for the 1-step
+state in which P1a was developed):
 
 1. **The old servo amplified missed Syncs (partial cause).** The Phase-2 servo
    (deadbeat phase + a fresh, unbounded `offset/elapsed` rate estimate each cycle)
@@ -172,12 +213,14 @@ artifact.** The root cause and the fix, precisely:
    pre-congestion Pdelay exchanges establish the floor) rejects the inflated
    samples. That takes the peak from ~20,500 µs to **510.47 µs**.
 
-3. **What 510 µs *is*.** It is the real extra queueing delay a `coreClient`-bound
-   Sync experiences waiting behind a near-full 10-packet bottleneck queue
-   (10 × ~76 µs ≈ 760 µs, minus the fraction of Syncs dropped outright). That is
-   exactly the M3 mechanism — the shared-queue coupling — now measured cleanly
-   instead of being buried under servo ringing and peer-delay garbage. It stays
-   **21.2x** its own baseline (clearly the one degraded node) and sits in the same
+3. **What the peak *is*.** It is the real extra queueing delay a
+   `coreClient`-bound Sync experiences waiting behind a near-full 10-packet
+   bottleneck queue (10 × ~76 µs ≈ 760 µs, minus the fraction of Syncs dropped
+   outright). That is exactly the M3 mechanism — the shared-queue coupling — now
+   measured cleanly instead of being buried under servo ringing and peer-delay
+   garbage. Under P2b's 2-step framing the surviving peak is **429.21 µs** (17.8x
+   its own baseline; it was 510.47 µs / 21.2x under 1-step — the paired-frame
+   survival effect above); clearly the one degraded node either way, in the same
    ~hundreds-of-µs-to-low-ms regime as INET's 1,949.64 µs.
 
 The isolation finding is untouched (all 16 other nodes still exactly 1.0x). Both
@@ -190,7 +233,7 @@ linuxptp PI idea + a first-principles floor estimator, no ptp4l/INET source read
 ```
   [PASS] baseline (no traffic): every node still converges (|final| < 2 us)
   [PASS] congestion is real: bottleneck queue actually drops packets
-  [PASS] coreClient sync degrades under load (21.2x its baseline, 510.473 us)
+  [PASS] coreClient sync degrades under load (17.8x its baseline, 429.207 us)
   [PASS] every OTHER node stays within 5 us of its baseline (isolation)
 ```
 
@@ -204,9 +247,11 @@ linuxptp PI idea + a first-principles floor estimator, no ptp4l/INET source read
 - **Does not (deferred / simplified):** hop-by-hop L2 forwarding of the data
   (S5), full adaptive ptp4l-grade servo behavior (P1a hardens the loop to a
   bounded PI with missed-Sync skip + a peer-delay outlier filter, but not a full
-  spike-rejection state machine), IEEE TLV wire format / pcap. Carries S1/S2/S4
-  forward unchanged; **S3 (`neighborRateRatio`) is closed by P2a** (≤ 2 ns effect
-  here, see the Simplifications section); the P1a servo/peer-delay hardening stands.
+  spike-rejection state machine), IEEE TLV wire format / pcap. Carries S1/S4
+  forward unchanged; **S2 (2-step framing) closed by P2b** (the one Tier-2 item
+  that moved M3's numbers — peak 510.473 → 429.207 µs, servo 170 → 90, see the
+  Simplifications section) and **S3 (`neighborRateRatio`) closed by P2a** (≤ 2 ns
+  effect here); the P1a servo/peer-delay hardening stands.
 
 ### Honest licensing note
 
