@@ -264,8 +264,10 @@ the project's existing quality bar for OMNeT++/INET.
   an honest finding, documented). Stretch goal (Mermaid/Pages):
   `plot_results.py`/`build_site.py` also route through the patched `simdata.py`,
   so they build a full `index.html` from the ns-3 CSVs with zero further changes
-  -- verified end-to-end; one small deferred gap (backlog/coupling plots need a
-  `queueLength:vector` export not yet emitted). **Not yet confirmed in real CI**
+  -- verified end-to-end. The one small gap here (backlog/coupling plots needed a
+  `queueLength:vector` export) is **closed by P1b**: the drivers now export a
+  per-switch-egress-queue backlog time series, so those two plots render non-empty
+  (and `analyze.py`'s own egress-backlog section lights up too). **Not yet confirmed in real CI**
   -- same Docker-daemon caveat. Full evidence, schema, and honest notes in
   `OBSERVABILITY.md`.
 - **CI/CD + GitHub Pages: wired in `.github/workflows/ci.yml`.** This closes the

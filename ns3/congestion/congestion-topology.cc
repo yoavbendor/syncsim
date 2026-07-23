@@ -162,6 +162,13 @@ struct PassState
     uint32_t backlogMax{0};
     Ptr<Queue<Packet>> bottleneckQueue;
     std::vector<QueueCounters> queueCounters; // Phase 4: per-switch-egress scalars
+    // P1b: per-switch-egress queue-length time series (queueLength:vector export).
+    // Parallel to queueCounters: qSampleQueues[i]/qSampleNames[i] describe queue i,
+    // qLenTime[i]/qLenVal[i] are its sampled (global time, backlog packets) series.
+    std::vector<Ptr<Queue<Packet>>> qSampleQueues;
+    std::vector<std::string> qSampleNames;
+    std::vector<std::vector<double>> qLenTime;
+    std::vector<std::vector<double>> qLenVal;
 };
 
 PassState* g_active = nullptr;
@@ -214,6 +221,27 @@ SampleBacklog(Time interval, Time stopAt)
     Simulator::Schedule(interval, &SampleBacklog, interval, stopAt);
 }
 
+// P1b (M5 / observability): periodically sample every traced switch-egress
+// queue's current backlog into a per-queue time series, exported as
+// queueLength:vector rows (see WriteVectorsCsv). Read-only (GetNPackets only),
+// so it does not perturb the simulation -- the gate numbers are byte-identical
+// whether or not this runs; it is scheduled only when --resultDir is set.
+void
+SampleQueueLengths(Time interval, Time stopAt)
+{
+    if (Simulator::Now() >= stopAt)
+    {
+        return;
+    }
+    double now = Simulator::Now().GetSeconds();
+    for (size_t i = 0; i < g_active->qSampleQueues.size(); ++i)
+    {
+        g_active->qLenTime[i].push_back(now);
+        g_active->qLenVal[i].push_back(g_active->qSampleQueues[i]->GetNPackets());
+    }
+    Simulator::Schedule(interval, &SampleQueueLengths, interval, stopAt);
+}
+
 // One background source: inject a data frame on `dev` toward coreClient, then
 // reschedule after an exponential(mean) gap (seeded). Runs only in [start,stop].
 void
@@ -240,7 +268,8 @@ DataSource(Ptr<NetDevice> dev,
 void
 WriteVectorsCsv(const std::string& dir,
                 const std::vector<NodeMeta>& meta,
-                const std::map<int, std::vector<OffsetSample>>& traj)
+                const std::map<int, std::vector<OffsetSample>>& traj,
+                const PassState& state)
 {
     std::string path = dir + "/vectors.csv";
     std::ofstream f(path);
@@ -275,7 +304,37 @@ WriteVectorsCsv(const std::string& dir,
         f << module << ",timeChanged:vector,\"" << vt.str() << "\",\"" << vv.str() << "\"\n";
         ++written;
     }
-    std::cout << "[congestion] wrote " << path << " (" << written << " clock vectors)\n";
+    // P1b: one queueLength:vector row per traced switch-egress queue -- module
+    // "Nominal.<node>.eth<port>.macLayer.queue" (the bracket-free ns-3 form
+    // scripts/plot_results.py's BOTTLENECK/_resolve_bottleneck already match, so
+    // its backlog + offset-vs-backlog-coupling plots render). vectime = global
+    // sample time (s), vecvalue = queue backlog (packets) at that time.
+    uint32_t qwritten = 0;
+    for (size_t i = 0; i < state.qSampleNames.size(); ++i)
+    {
+        if (state.qLenTime[i].empty())
+        {
+            continue;
+        }
+        std::ostringstream vt, vv;
+        vt << std::setprecision(15);
+        vv << std::setprecision(15);
+        for (size_t k = 0; k < state.qLenTime[i].size(); ++k)
+        {
+            if (k)
+            {
+                vt << ' ';
+                vv << ' ';
+            }
+            vt << state.qLenTime[i][k];
+            vv << state.qLenVal[i][k];
+        }
+        f << state.qSampleNames[i] << ",queueLength:vector,\"" << vt.str() << "\",\"" << vv.str()
+          << "\"\n";
+        ++qwritten;
+    }
+    std::cout << "[congestion] wrote " << path << " (" << written << " clock vectors, " << qwritten
+              << " queueLength vectors)\n";
 }
 
 void
@@ -326,7 +385,8 @@ runScenario(bool background,
             uint32_t queueCap,
             double meanGapUs,
             std::vector<Stat>& st,
-            PassState& state)
+            PassState& state,
+            bool sampleQueues)
 {
     g_active = &state;
 
@@ -410,6 +470,16 @@ runScenario(bool background,
         q->TraceConnectWithoutContext("Dequeue", MakeBoundCallback(&QDequeue, qc));
         q->TraceConnectWithoutContext("Drop", MakeBoundCallback(&QDrop, qc));
     }
+    // P1b: per-queue backlog time series (queueLength:vector export). Same queues,
+    // same module names as the scalar counters; sampled periodically below.
+    state.qSampleNames = switchDevNames;
+    state.qSampleQueues.clear();
+    for (auto& d : switchDevs)
+    {
+        state.qSampleQueues.push_back(d->GetQueue());
+    }
+    state.qLenTime.assign(switchDevs.size(), {});
+    state.qLenVal.assign(switchDevs.size(), {});
     // Bottleneck = swCore->coreClient egress queue: trace drops + sample backlog.
     Ptr<NetDevice> bottleneckDev = coreToCoreClient.Get(0); // swCore's side
     Address coreClientPeer = coreToCoreClient.Get(1)->GetAddress();
@@ -445,6 +515,15 @@ runScenario(bool background,
                                 Seconds(simTime));
         }
         Simulator::Schedule(Seconds(bgStart), &SampleBacklog, MilliSeconds(1), Seconds(simTime));
+    }
+
+    // P1b: queueLength:vector sampling over the whole run (5 ms cadence). Only
+    // scheduled when the caller wants the CSV (--resultDir set); read-only, so
+    // when it is not scheduled the run is byte-identical to before.
+    if (sampleQueues)
+    {
+        Simulator::Schedule(MilliSeconds(5), &SampleQueueLengths, MilliSeconds(5),
+                            Seconds(simTime));
     }
 
     Simulator::Stop(Seconds(simTime));
@@ -530,13 +609,15 @@ main(int argc, char* argv[])
     std::vector<Stat> stBase;
     PassState base;
     runScenario(false, meta, simTime, bgStart, syncIntervalMs, pdelayIntervalMs, queueCap,
-                meanGapUs, stBase, base);
+                meanGapUs, stBase, base, /*sampleQueues=*/false);
 
     // ---- Pass 2: congested (finite queues + background) --------------------
+    // Only the congested pass is exported, so only it needs queue-length sampling
+    // (and only when --resultDir is set -- otherwise the run stays byte-identical).
     std::vector<Stat> stBg;
     PassState bg;
     runScenario(true, meta, simTime, bgStart, syncIntervalMs, pdelayIntervalMs, queueCap,
-                meanGapUs, stBg, bg);
+                meanGapUs, stBg, bg, /*sampleQueues=*/!resultDir.empty());
 
     // ======================= Evidence reporting =============================
     std::cout << std::fixed;
@@ -640,7 +721,7 @@ main(int argc, char* argv[])
         // See nominal-topology.cc's matching comment: std::ofstream doesn't
         // create missing directories, found during independent verification.
         std::filesystem::create_directories(resultDir);
-        WriteVectorsCsv(resultDir, meta, bg.traj);
+        WriteVectorsCsv(resultDir, meta, bg.traj, bg);
         WriteScalarsCsv(resultDir + "/scalars.csv", bg.queueCounters);
     }
 

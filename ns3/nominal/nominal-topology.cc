@@ -110,6 +110,32 @@ OffsetSink(int id, Time global, double offsetSec)
     g_traj[id].push_back({global.GetSeconds(), offsetSec * 1e6});
 }
 
+// P1b (M5 / observability): per-switch-egress queue-length time series, exported
+// as queueLength:vector rows (see WriteVectorsCsv). Nominal has no background
+// traffic, so these backlogs sit near 0 -- exported anyway for schema consistency
+// with congestion/feedback (the task's explicit ask). Read-only sampling, so the
+// M2 gate numbers are byte-identical whether or not it runs.
+std::vector<Ptr<Queue<Packet>>> g_qSampleQueues;
+std::vector<std::string> g_qSampleNames;
+std::vector<std::vector<double>> g_qLenTime;
+std::vector<std::vector<double>> g_qLenVal;
+
+void
+SampleQueueLengths(Time interval, Time stopAt)
+{
+    if (Simulator::Now() >= stopAt)
+    {
+        return;
+    }
+    double now = Simulator::Now().GetSeconds();
+    for (size_t i = 0; i < g_qSampleQueues.size(); ++i)
+    {
+        g_qLenTime[i].push_back(now);
+        g_qLenVal[i].push_back(g_qSampleQueues[i]->GetNPackets());
+    }
+    Simulator::Schedule(interval, &SampleQueueLengths, interval, stopAt);
+}
+
 // ns-3 ReceiveCallback signature -> GptpEntity::OnDeviceReceive.
 bool
 RxTrampoline(syncsim::GptpEntity* ent,
@@ -174,8 +200,35 @@ WriteVectorsCsv(const std::string& dir,
         f << module << ",timeChanged:vector,\"" << vt.str() << "\",\"" << vv.str() << "\"\n";
         ++written;
     }
-    std::cout << "[nominal] wrote " << path << " (" << written << " clock vectors, "
-              << "opp_scavetool-schema)\n";
+    // P1b: one queueLength:vector row per traced switch-egress queue (module
+    // "Nominal.<node>.eth<port>.macLayer.queue", vectime = global time (s),
+    // vecvalue = backlog packets) -- same schema/naming as congestion/feedback.
+    uint32_t qwritten = 0;
+    for (size_t i = 0; i < g_qSampleNames.size(); ++i)
+    {
+        if (g_qLenTime[i].empty())
+        {
+            continue;
+        }
+        std::ostringstream vt, vv;
+        vt << std::setprecision(15);
+        vv << std::setprecision(15);
+        for (size_t k = 0; k < g_qLenTime[i].size(); ++k)
+        {
+            if (k)
+            {
+                vt << ' ';
+                vv << ' ';
+            }
+            vt << g_qLenTime[i][k];
+            vv << g_qLenVal[i][k];
+        }
+        f << g_qSampleNames[i] << ",queueLength:vector,\"" << vt.str() << "\",\"" << vv.str()
+          << "\"\n";
+        ++qwritten;
+    }
+    std::cout << "[nominal] wrote " << path << " (" << written << " clock vectors, " << qwritten
+              << " queueLength vectors, opp_scavetool-schema)\n";
 }
 
 } // namespace
@@ -256,22 +309,39 @@ main(int argc, char* argv[])
     // ---- Link builder ------------------------------------------------------
     // Adds a CSMA link a<->b, registers a port on each entity (a's side isMaster
     // = aIsMaster, b's side is the opposite), and wires each device's receive
-    // callback to the owning entity + its port index.
-    auto link = [&](int a, int b, bool aIsMaster) {
+    // callback to the owning entity + its port index. aIsSwitch/bIsSwitch mark
+    // switch egresses (P1b: collected for the queueLength:vector export, matching
+    // congestion/feedback's switch set exactly -- swCore + swA/B/C, all ports).
+    std::vector<Ptr<CsmaNetDevice>> switchDevs;
+    std::vector<std::string> switchDevNames;
+    auto qname = [&](int node, uint32_t port) {
+        return "Nominal." + meta[node].name + ".eth" + std::to_string(port) + ".macLayer.queue";
+    };
+    auto link = [&](int a, int b, bool aIsMaster, bool aIsSwitch, bool bIsSwitch) {
         NetDeviceContainer dv = csma.Install(NodeContainer(nodes.Get(a), nodes.Get(b)));
         uint32_t pa = ent[a]->AddPort(dv.Get(0), dv.Get(1)->GetAddress(), aIsMaster);
         uint32_t pb = ent[b]->AddPort(dv.Get(1), dv.Get(0)->GetAddress(), !aIsMaster);
         dv.Get(0)->SetReceiveCallback(MakeBoundCallback(&RxTrampoline, ent[a].get(), pa));
         dv.Get(1)->SetReceiveCallback(MakeBoundCallback(&RxTrampoline, ent[b].get(), pb));
+        if (aIsSwitch)
+        {
+            switchDevs.push_back(DynamicCast<CsmaNetDevice>(dv.Get(0)));
+            switchDevNames.push_back(qname(a, pa));
+        }
+        if (bIsSwitch)
+        {
+            switchDevs.push_back(DynamicCast<CsmaNetDevice>(dv.Get(1)));
+            switchDevNames.push_back(qname(b, pb));
+        }
     };
 
     // gm -> swCore : gm is MASTER (sources Sync), swCore is SLAVE.
-    link(GM, SWCORE, /*aIsMaster=*/true);
+    link(GM, SWCORE, /*aIsMaster=*/true, false, true);
     // swCore -> its four children : swCore is MASTER on each.
-    link(SWCORE, CORECLIENT, true);
-    link(SWCORE, SWA, true);
-    link(SWCORE, SWB, true);
-    link(SWCORE, SWC, true);
+    link(SWCORE, CORECLIENT, true, true, false);
+    link(SWCORE, SWA, true, true, true);
+    link(SWCORE, SWB, true, true, true);
+    link(SWCORE, SWC, true, true, true);
     // Each zone switch -> its four clients : zone switch is MASTER on each.
     int zoneSw[3] = {SWA, SWB, SWC};
     for (int z = 0; z < 3; ++z)
@@ -279,9 +349,19 @@ main(int argc, char* argv[])
         for (int i = 0; i < 4; ++i)
         {
             int client = 6 + z * 4 + i;
-            link(zoneSw[z], client, /*aIsMaster=*/true);
+            link(zoneSw[z], client, /*aIsMaster=*/true, true, false);
         }
     }
+
+    // P1b: register the switch-egress queues for the queueLength:vector sampler.
+    g_qSampleNames = switchDevNames;
+    g_qSampleQueues.clear();
+    for (auto& d : switchDevs)
+    {
+        g_qSampleQueues.push_back(d->GetQueue());
+    }
+    g_qLenTime.assign(switchDevs.size(), {});
+    g_qLenVal.assign(switchDevs.size(), {});
 
     // ---- Offset trajectories (every non-GM node) ---------------------------
     for (int id = 1; id < NNODES; ++id)
@@ -302,6 +382,14 @@ main(int argc, char* argv[])
     }
     // GM sources Sync every syncInterval.
     Simulator::Schedule(syncInterval, &syncsim::GptpEntity::SendSync, ent[GM].get(), syncInterval);
+
+    // P1b: queueLength:vector sampling over the whole run (5 ms cadence), only
+    // when --resultDir is set. Read-only, so unset => byte-identical to before.
+    if (!resultDir.empty())
+    {
+        Simulator::Schedule(MilliSeconds(5), &SampleQueueLengths, MilliSeconds(5),
+                            Seconds(simTime));
+    }
 
     Simulator::Stop(Seconds(simTime));
     Simulator::Run();

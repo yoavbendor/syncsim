@@ -48,7 +48,7 @@ treatment:
 | **S5** | **Background congestion traffic injected at the bottleneck egress, not truly forwarded hop-by-hop** | **Shape-level, real root cause** | **Mainline ns-3's `CsmaChannel` is half-duplex shared-medium; a real forwarding attempt spuriously coupled every node's sync (confirmed empirically)** | **Shape — a real topological difference from INET** | 3 |
 | S6 | Approximate clock-driven burst scheduling (recomputed per-burst, not true mid-flight re-anchoring) | Precision-only | ns-3 has no `scheduleForAbsoluteTime` primitive | Precision only — still genuinely clock-driven | 2 |
 | — | **M3 servo lock-loss transient**: congested peak 24× larger than INET's — ✅ **FIXED (P1a): 46,281 µs → 510 µs** | **Real, undamped anomaly** | Phase 2's deadbeat-phase + naive-integral-frequency servo overreacting to a wild rate estimate after a sporadically missed Sync — **plus** (found during the fix) a peer-delay `d` corrupted to tens of ms by Pdelay contention on the saturated shared CSMA medium, the dominant driver | **Magnitude — the one number this undermined trust in** | **1** |
-| — | `queueLength:vector` not exported | Missing capability, cheap | Never wired up in Phase 4 | Blocks Pages backlog/coupling plots for ns-3 (already-scaffolded code, missing data) | **1** |
+| — | `queueLength:vector` not exported — ✅ **DONE (P1b)** | Missing capability, cheap | Never wired up in Phase 4; now sampled per switch-egress queue + exported to `vectors.csv` | Was blocking Pages backlog/coupling plots for ns-3 (already-scaffolded code, missing data) — now render non-empty | **1** |
 | — | No pcap capture/replay past Phase 0's smoke test | Missing capability, moderate | Not built | Debuggability gap; own-format capture/replay is cheap, IEEE-dissectable capture is not (see Tier 3) | 2 |
 | — | No YAML-topology-DSL equivalent (Phase B) | Missing capability, large | Not built | Every ns-3 topology is hand-coded C++, not data-driven | 3 |
 | — | No GUI/interactive tooling (Qtenv/IDE equivalent) | Missing capability, large | Not built; ns-3's own tools (NetAnim/PyViz) are a different paradigm, not a clean port target | Developer-experience gap, not a fidelity gap | 3 |
@@ -136,7 +136,24 @@ it's an under-damped implementation). The M3 isolation shape (16/17 nodes at
 ratio 1.0x) must still hold exactly. Gates 0–2 and M2/M4/M5 must all still
 pass unchanged (regression).
 
-### P1b — Export `queueLength:vector`
+### P1b — Export `queueLength:vector` — ✅ **DONE**
+
+**Status (done):** `nominal`/`congestion`/`feedback-topology.cc` now sample every
+traced switch-egress queue's backlog (5 ms cadence, whole run) and write one
+`queueLength:vector` row per queue into `vectors.csv` (module
+`Nominal.<node>.eth<port>.macLayer.queue`, the bracket-free ns-3 form
+`plot_results.py` already matches; 20 queues per scenario). Sampling is read-only
+and scheduled only when `--resultDir` is set, so stdout and every gate stay
+**byte-identical** when unset (verified; all three still deterministic). Verified
+end-to-end: `plot_results.py` against fresh `congestion`/`feedback` output now
+renders **non-empty** backlog + offset-vs-backlog-coupling PNGs (54–92 KB;
+congestion backlog reaches its 10-packet cap, mean ≈ 8.5; feedback spikes to its
+20-packet cap under the aligned microbursts). Bonus: `analyze.py`'s pre-existing
+`[analyze] egress queue backlog (packets):` section — previously always empty for
+ns-3 — now lights up too. `ns3/OBSERVABILITY.md`'s "known gap" note is updated to
+closed.
+
+---
 
 Cheap and already scaffolded: `plot_results.py`'s `plot_backlog`/
 `plot_coupling` already look for this signal and degrade gracefully to
