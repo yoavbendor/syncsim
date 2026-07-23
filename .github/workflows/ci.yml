@@ -193,9 +193,135 @@ jobs:
             results-gen-minimal/
             results-gen-nominal/
 
+      # ---- ns-3 POC track (NS3_MIGRATION_SURVEY.md / NS3_MIGRATION_POC_PLAN.md) ----
+      # Entirely additive and non-destructive, matching every prior ns-3 commit
+      # on this branch: a parallel Docker stage, own source tree (ns3/), own
+      # gates -- OMNeT++/INET above remains authoritative and untouched by any
+      # step in this section. This is the first time any of it has run in a
+      # clean CI container; every ns3/README.md gate entry up to this commit
+      # was proven only in a local sandbox with no Docker daemon available,
+      # explicitly flagged "not yet confirmed in real CI" every single time --
+      # this section is what finally closes that standing gap.
+      #
+      # analyze.py/plot_results.py need pandas/matplotlib, which the minimal
+      # `ns3` stage deliberately doesn't carry (keeping its own build fast,
+      # per the Dockerfile's own rationale) -- reuse the already-built
+      # syncsim:ci image for those steps instead of adding Python deps to a
+      # stage that has no other use for them. The ns-3 binaries themselves
+      # need nothing from syncsim:ci; they run in syncsim:ns3.
+      - name: Build ns-3 image (ns-3 POC track)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: ns3
+          load: true
+          tags: syncsim:ns3
+          cache-from: type=gha,scope=ns3
+          cache-to: type=gha,mode=max,scope=ns3
+
+      # Gates 0/1/2: data-plane smoke, steerable clock, single-bridge gPTP
+      # servo. No result-dir/CSV export -- each binary's own exit code
+      # (0 = every internal gate check passed) is the pass/fail signal,
+      # exactly as it was every time this ran in the sandbox.
+      - name: Run ns-3 Gates 0/1/2 (smoke, clock, gPTP spikes)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ns3 bash -lc '
+            set -e
+            bash ns3/scripts/run.sh smoke-topology
+            bash ns3/scripts/run.sh clock-spike
+            bash ns3/scripts/run.sh gptp-spike
+          '
+
+      - name: Run ns-3 M2 (multi-hop bridging, 18 nodes)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ns3 \
+            bash ns3/scripts/run.sh nominal-topology -- --resultDir=results-ns3-nominal
+
+      - name: Export + analyze ns-3 M2 telemetry (scripts/analyze.py, unmodified)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
+            python3 scripts/analyze.py results-ns3-nominal --strict --sim-time 30
+
+      - name: Archive ns-3 M2 results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ns3-nominal-results
+          path: results-ns3-nominal/
+
+      - name: Run ns-3 M3 (finite queues + background congestion)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ns3 \
+            bash ns3/scripts/run.sh congestion-topology -- --resultDir=results-ns3-congestion
+
+      - name: Export + analyze ns-3 M3 telemetry
+        # Same --strict philosophy as the OMNeT++ congestion job: gates on
+        # model-correctness sanity, not on how large coreClient's degraded
+        # peak is -- see ns3/congestion/README.md's own honest note on why
+        # that peak is larger than INET's (a Phase-2 servo lock-loss
+        # transient, not free-run drift; still well under the default 50ms
+        # divergence ceiling).
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
+            python3 scripts/analyze.py results-ns3-congestion --strict --sim-time 30
+
+      - name: Archive ns-3 M3 results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ns3-congestion-results
+          path: results-ns3-congestion/
+
+      - name: Run ns-3 M4 (clock-aligned burst traffic)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ns3 \
+            bash ns3/scripts/run.sh feedback-topology -- --resultDir=results-ns3-feedback
+
+      - name: Export + analyze ns-3 M4 telemetry
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
+            python3 scripts/analyze.py results-ns3-feedback --strict --sim-time 30
+
+      - name: Archive ns-3 M4 results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ns3-feedback-results
+          path: results-ns3-feedback/
+
+      - name: Run ns-3 M5 (queue-capacity sweep)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ns3 \
+            bash ns3/scripts/run_sweep.sh congestion-topology results-ns3-sweep 5 20 80
+
+      - name: Summarize ns-3 sweep
+        # Same scope boundary as the OMNeT++ sweep job: informational, not
+        # gated by --strict (a multi-iteration dir violates analyze.py's
+        # one-module-path-one-series assumption). --bottleneck-module is
+        # ns-3's bracket-free module-name form ("eth1", not OMNeT++'s
+        # "eth[1]") -- summarize_sweep.py's own default is the OMNeT++ form,
+        # so this must be passed explicitly for the ns-3 track (a real, small
+        # gap found and documented in NS3_MIGRATION_SURVEY-adjacent work,
+        # not a bug in the tool itself).
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci \
+            python3 scripts/summarize_sweep.py results-ns3-sweep --var cap \
+              --bottleneck-module Nominal.swCore.eth1.macLayer.queue
+
+      - name: Archive ns-3 M5 results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ns3-sweep-results
+          path: results-ns3-sweep/
+
       # ---- Phase A: visual report -> GitHub Pages ----
-      # All result dirs (results, results-nominal, ...) persist in the workspace
-      # across steps, so one step turns them all into site/index.html.
+      # All result dirs (results, results-nominal, ..., results-ns3-nominal, ...)
+      # persist in the workspace across steps, so one step turns them all into
+      # site/index.html -- OMNeT++ (M1-M5) and ns-3 (M2-M5) sections side by
+      # side on the same published report, same site/ dir, same downstream
+      # upload/deploy steps, no changes needed to either.
       - name: Build visual report (site/)
         run: |
           docker run --rm -v "${{ github.workspace }}:/work" syncsim:ci bash -lc '
@@ -205,6 +331,10 @@ jobs:
             python3 scripts/plot_results.py --result-dir results-congestion --slug m3-congestion --title "M3 - Sustained congestion"      --network Nominal --ini simulations/congestion.ini --site site
             python3 scripts/plot_results.py --result-dir results-feedback   --slug m4-feedback   --title "M4 - Clock-aligned bursts"      --network Nominal --ini simulations/feedback.ini   --site site
             python3 scripts/plot_results.py --result-dir results-sweep      --slug m5-sweep      --title "M5 - Buffer-size sweep"         --network Nominal --ini simulations/sweep.ini      --site site --kind sweep
+            python3 scripts/plot_results.py --result-dir results-ns3-nominal    --slug ns3-m2-nominal    --title "ns-3 POC: M2 - Multi-hop (18 nodes)"       --network Nominal --ini simulations/nominal.ini    --site site
+            python3 scripts/plot_results.py --result-dir results-ns3-congestion --slug ns3-m3-congestion --title "ns-3 POC: M3 - Sustained congestion"       --network Nominal --ini simulations/congestion.ini --site site
+            python3 scripts/plot_results.py --result-dir results-ns3-feedback   --slug ns3-m4-feedback   --title "ns-3 POC: M4 - Clock-aligned bursts"       --network Nominal --ini simulations/feedback.ini   --site site
+            python3 scripts/plot_results.py --result-dir results-ns3-sweep      --slug ns3-m5-sweep      --title "ns-3 POC: M5 - Buffer-size sweep"          --network Nominal --ini simulations/sweep.ini      --site site --kind sweep
             python3 scripts/build_site.py --site site
           '
 

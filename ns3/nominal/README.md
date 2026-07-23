@@ -1,0 +1,216 @@
+# ns3/nominal/ — Phase 3 (M2 / R-BRIDGE): multi-hop time-aware bridges
+
+Clean-room, permissively-licensed (Apache-2.0) proof that syncsim's M2
+("Nominal") multi-hop gPTP scenario reproduces on ns-3, built on the Phase-1
+`syncsim::Clock` and the **unchanged** Phase-2 gPTP mechanism. This is the
+`R-BRIDGE` risk in `NS3_MIGRATION_POC_PLAN.md` — "multi-hop time-aware bridges
+with residence-time correction, the riskiest gPTP piece" — chaining the exact
+dual slave+master bridge role Phase 2 proved once, two levels deep.
+
+## The question this phase answers
+
+Phase 2's `GptpEntity` (1 slave port + N master ports, additive correction
+field `upstreamCorrection + linkDelay + residence`) was written generically —
+nothing in it assumes exactly one bridge hop. **Does it already generalize to a
+chain of bridges (multi-hop) with zero changes to `gptp.h`/`gptp.cc`?**
+
+**Finding: yes — zero changes.** `gptp.{h,cc}` here are a **byte-identical
+vendored copy** of `ns3/gptp/`'s (confirmed by `md5sum`), not edited. The
+correction-field accumulation composes hop-by-hop by construction:
+
+- `gm` sources `Sync` with `correctionField = 0`.
+- `swCore` (slave toward `gm`) reconstructs GM time as
+  `origin + 0 + d(gm,swCore)`, servos, and after its residence time regenerates
+  `Sync` on all four master ports with
+  `correctionField = d(gm,swCore) + residence_swCore`.
+- each zone switch `swA/B/C` (slave toward `swCore`) reconstructs
+  `origin + [d(gm,swCore)+residence_swCore] + d(swCore,swZone)`, servos, and
+  regenerates with the accumulated
+  `correctionField = [d(gm,swCore)+residence_swCore] + d(swCore,swZone) + residence_swZone`.
+- each leaf client reconstructs GM time from the **full accumulated
+  correction** plus its own last-hop peer delay, and servos.
+
+Nothing in `HandleSync` / `RelayDownstream` / `ApplyServo` counts hops or
+assumes depth 1: a bridge is simply "a node with >1 port"
+(`m_ports.size() == 1` is the *end-station* branch), and the additive
+correction field means each hop only ever adds its own two locally-measured
+durations (its slave-side peer delay + its residence time). `swCore` **and**
+each zone switch play the identical dual role the single Phase-2 `sw` proved.
+
+The only new code in this phase is the topology builder + scenario driver
+(`nominal-topology.cc`) — 18 nodes across three hop depths, wired the same way
+`gptp-spike.cc` wires one bridge.
+
+### Why `clock.{h,cc}` and `gptp.{h,cc}` are vendored here
+
+Same constraint Phase 2 hit and documented: ns-3's scratch build makes each
+`scratch/<subdir>` an independent target and **cannot share a `.cc` across
+sibling scratch subdirs**, and the Dockerfile is intentionally one `COPY
+ns3/nominal` line. So this subdir is self-contained: `clock.{h,cc}` and
+`gptp.{h,cc}` are copied in verbatim (confirmed byte-identical to
+`ns3/clock/` and `ns3/gptp/`). They are the same clean-room Apache-2.0 sources,
+not forks. **The vendored gptp being byte-identical is itself the headline
+result** — the multi-hop generalization needed no model change.
+
+## Files
+
+| File | Role | License |
+|---|---|---|
+| `nominal-topology.cc` | M2 proof scenario (`main`) — the 18-node multi-hop run | Apache-2.0 (ours) |
+| `gptp.h` / `gptp.cc` | **Vendored byte-identical** from `ns3/gptp/` — unchanged | Apache-2.0 (ours) |
+| `clock.h` / `clock.cc` | **Vendored byte-identical** from `ns3/clock/` | Apache-2.0 (ours) |
+
+Builds as target **`nominal-topology`** →
+`build/scratch/syncsim-nominal/ns3.45-nominal-topology`.
+
+## Topology (from `simulations/nominal.ned` / `nominal.ini`)
+
+```
+  gm(0ppm)
+    |                                       hop 1: swCore
+  swCore(50ppm)
+    |-- coreClient(150ppm)                  hop 2: coreClient, swA, swB, swC
+    |-- swA(80ppm)  --- clientsA[0..3]       hop 3: the 12 zone clients
+    |-- swB(-60ppm) --- clientsB[0..3]
+    |-- swC(100ppm) --- clientsC[0..3]
+
+  swCore: eth0=gm (SLAVE), eth1..eth4 (MASTER, to coreClient/swA/swB/swC)
+  swZone: eth0=swCore (SLAVE), eth1..eth4 (MASTER, to its 4 clients)
+```
+
+18 nodes, 17 links, 100 Mbps uniform. Drift rates match `nominal.ini`
+(`gm`=0, `swCore`=50, `swA`=80, `swB`=−60, `swC`=100, `coreClient`=150 ppm);
+the 12 zone clients draw `uniform(−200,200) ppm` from ns-3's own seeded
+`UniformRandomVariable` (seed=1, run=1) — a deterministic per-client spread
+across INET's range, **not** an attempt to match INET's specific RNG draws
+(impossible across two RNGs, and not the point per the task).
+
+## Result — **GATE PASS** (sandbox, ns-3.45, release build, asserts on)
+
+`nominal-topology` exits `0`. **Deterministic**: byte-identical stdout across
+two consecutive runs (`md5sum` matched); the only RNG use is the 12 seeded
+client drift draws, so determinism is structural under the pinned seed/run.
+
+30 s run, Sync interval 0.125 s (INET default; 239 servo corrections/node),
+peer-delay interval 0.05 s.
+
+### Seeded client drift draws (deterministic)
+
+```
+  clientsA[0]=+126.61  A[1]=+42.74  A[2]=−1.77   A[3]=−47.36  ppm
+  clientsB[0]=−52.37   B[1]=+122.64 B[2]=−159.65 B[3]=+33.92  ppm
+  clientsC[0]=+175.62  C[1]=+50.44  C[2]=+128.78 C[3]=+23.71  ppm
+```
+
+### Per-node offset-from-GM (every one of the 18 nodes)
+
+```
+           node | hops |   ppm |  peak us | final us | servos
+  --------------------------------------------------------------
+         swCore |  1   |  50.0 |    6.250 |    0.000 | 239
+     coreClient |  2   | 150.0 |   18.750 |    0.000 | 239
+            swA |  2   |  80.0 |   10.000 |    0.000 | 239
+            swB |  2   | −60.0 |    8.501 |    0.000 | 239
+            swC |  2   | 100.0 |   12.500 |    0.000 | 239
+    clientsA[0] |  3   | 126.6 |   15.828 |    0.000 | 239
+    clientsA[1] |  3   |  42.7 |    5.342 |    0.000 | 239
+    clientsA[2] |  3   |  −1.8 |    1.723 |    0.000 | 239
+    clientsA[3] |  3   | −47.4 |    7.423 |    0.000 | 239
+    clientsB[0] |  3   | −52.4 |    8.046 |    0.000 | 239
+    clientsB[1] |  3   | 122.6 |   15.330 |    0.000 | 239
+    clientsB[2] |  3   |−159.6 |   21.460 |    0.000 | 239
+    clientsB[3] |  3   |  33.9 |    4.240 |    0.000 | 239
+    clientsC[0] |  3   | 175.6 |   21.952 |    0.000 | 239
+    clientsC[1] |  3   |  50.4 |    6.305 |    0.000 | 239
+    clientsC[2] |  3   | 128.8 |   16.098 |    0.000 | 239
+    clientsC[3] |  3   |  23.7 |    2.964 |    0.000 | 239
+```
+
+**Every one of the 18 nodes converges to 0.000 µs final and holds** (well under
+the 2 µs tolerance), across all three hop depths. That is the gate.
+
+### Peak grouped by hop depth (INET's own reporting shape)
+
+```
+  hops | nodes | mean peak us | max peak us
+  -------------------------------------------
+     1 |   1   |     6.250    |    6.250
+     2 |   4   |    12.438    |   18.750
+     3 |  12   |    10.559    |   21.952
+  INET M2 reference (orientation only): hops=1 ~7.36; hops=2 mean 12.19 max 18.75;
+                                        hops=3 mean 8.40 max 17.90 us
+```
+
+Representative measured peer delays (mechanism sanity) — small, positive,
+stable: `gm↔swCore`, `swCore↔swA`, `swA↔clientsA[0]` all **6.620 µs** (1 µs
+channel delay + one 100 Mbps frame serialization, per S1).
+
+### The honest, non-obvious finding — reproduced
+
+Peak error does **not** grow monotonically with hop count. **hops=3 mean
+(10.56 µs) is *lower* than hops=2 mean (12.44 µs)** — the same qualitative
+finding INET's own M2 run reported. The mechanism is visible in the per-node
+table: **each node's peak tracks its own `|drift|`, not its depth** — it lands
+almost exactly on `|ppm| × 0.125 s` (swCore 50 ppm → 6.25; coreClient 150 ppm →
+18.75; swA 80 ppm → 10.00; clientsB[2] −159.6 ppm → 21.46 ≈ 19.95 +
+multi-hop first-Sync latency). hops=2's mean is pulled up only because
+`coreClient` (150 ppm) and `swC` (100 ppm) happen to have larger drift than the
+average of the 12 seeded zone-client draws. So the hop-by-hop
+peer-delay + residence-time correction actively **prevents** upstream error from
+compounding: each node's local drift between corrections dominates its error far
+more than accumulated upstream offset does — exactly the effect the correction
+field is designed to produce. (Low-drift nodes like `clientsA[2]` at −1.8 ppm
+still show a ~1.7 µs peak, not ~0.2 µs, because the very first Sync reaches a
+depth-3 leaf ~40 µs after t = 0.125 s — three link delays + two residence times
+later — so a little extra drift accumulates before the first correction. Real,
+not an artifact.)
+
+Our absolute numbers differ from INET's in detail (different seeded drift draws,
+coarser S1 timestamping, unity `neighborRateRatio` per S3) — but per the POC
+plan the gate is the **mechanism** (every node converges near 0 across all hop
+depths, peak tracks local drift, no unbounded compounding with depth), not the
+digits. That mechanism reproduces faithfully.
+
+## What this does and does not establish
+
+- **Does:** the Phase-2 `GptpEntity` — additive correction field, dual
+  slave/master bridge role — generalizes to a **chain** of time-aware bridges
+  two hops deep with **zero model changes**. Hop-by-hop peer-delay +
+  residence-time propagation works through a multi-bridge tree; every node
+  across three hop depths converges near 0 and holds; peak error tracks local
+  drift and does not compound monotonically with depth. R-BRIDGE is not a
+  blocker.
+- **Does not (deferred):** data-plane congestion coupling (M3/M4 — this run has
+  no background/burst traffic and no finite-queue contention), `neighborRateRatio`
+  (S3), streaming-PHY-grade timestamps (S1), IEEE TLV wire format / pcap. Carries
+  forward all four Phase-2 simplifications (S1–S4) unchanged.
+
+### Honest licensing note
+
+Same as `clock/README.md` and `gptp/README.md`: the Apache-2.0 SPDX header
+covers *our files' copyright only*. Because this links against ns-3 core
+(GPL-2.0-only), the **combined, distributed binary is still GPLv2**. Clean-room
+buys copyright ownership and freedom from any one fork's terms — it does not make
+the ns-3 build permissive.
+
+### Not yet confirmed in real CI
+
+Same caveat as Gates 0/1/2: this sandbox has no Docker daemon, so the numbers
+above are from a local ns-3.45 build, not the Dockerfile `ns3` stage in a clean
+CI container. The `COPY ns3/nominal "$NS3_ROOT/scratch/syncsim-nominal"` line
+(added this phase) picks these files up automatically; verifying the
+containerized build is the standing "CI proves it reproduces" step.
+
+## Reproduce locally (no Docker)
+
+```bash
+git clone --branch ns-3.45 --depth 1 https://gitlab.com/nsnam/ns-3-dev.git /tmp/ns-3-dev
+cp -r ns3/nominal /tmp/ns-3-dev/scratch/syncsim-nominal
+cd /tmp/ns-3-dev
+./ns3 configure --build-profile=release \
+    --enable-modules=core,network,csma,bridge,point-to-point,applications,internet,flow-monitor \
+    --disable-examples --disable-tests --disable-python \
+    --enable-asserts --enable-logs
+./ns3 build nominal-topology
+./build/scratch/syncsim-nominal/ns3.45-nominal-topology   # exit 0 == GATE PASS
+```

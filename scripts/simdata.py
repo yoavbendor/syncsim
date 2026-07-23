@@ -34,7 +34,28 @@ HOP_MAPS = {
 
 
 def export_vectors_to_csv(result_dir: Path) -> Path | None:
-    """Use opp_scavetool to export .vec files to a long-form CSV."""
+    """Use opp_scavetool to export .vec files to a long-form CSV.
+
+    Phase 4 (ns-3 observability track) additive branch: if a ``vectors.csv``
+    already exists in ``result_dir``, use it directly and skip opp_scavetool.
+    This lets the ns-3 scenario drivers, which write this exact
+    ``module,name,vectime,vecvalue`` schema themselves, be analyzed by the
+    unchanged analyze.py/simdata.py without an OMNeT++ toolchain.
+
+    Why this is provably behavior-preserving for the OMNeT++ path (not merely
+    asserted): opp_scavetool is what *produces* ``vectors.csv`` in the first
+    place, so a real OMNeT++ result directory never contains one *before*
+    analyze.py runs -- it holds only ``.vec``/``.sca`` files. The early-return
+    branch below is therefore never taken on any genuine OMNeT++ run, and the
+    subsequent opp_scavetool call is reached exactly as before. (This is a
+    structural guarantee by inspection: no OMNeT++/INET toolchain is available
+    in the ns-3 POC sandbox to re-run and watch the OMNeT++ path pass, so this
+    is reasoned, not executed -- matching the project's honesty standard.)
+    """
+    existing = result_dir / "vectors.csv"
+    if existing.exists():
+        print(f"[simdata] using pre-existing {existing} (no opp_scavetool)")
+        return existing
     vec_files = glob.glob(str(result_dir / "*.vec"))
     if not vec_files:
         print(f"[simdata] no .vec files in {result_dir}", file=sys.stderr)
@@ -48,7 +69,18 @@ def export_vectors_to_csv(result_dir: Path) -> Path | None:
 
 
 def export_scalars_to_csv(result_dir: Path) -> Path | None:
-    """Use opp_scavetool to export .sca files to a long-form CSV."""
+    """Use opp_scavetool to export .sca files to a long-form CSV.
+
+    Phase 4 additive branch, symmetric to export_vectors_to_csv: prefer a
+    pre-existing ``scalars.csv`` (written directly by the ns-3 drivers) over
+    globbing .sca + opp_scavetool. Same behavior-preserving argument: a real
+    OMNeT++ result dir never has ``scalars.csv`` before analyze.py runs, so the
+    branch is never taken on the OMNeT++ path.
+    """
+    existing = result_dir / "scalars.csv"
+    if existing.exists():
+        print(f"[simdata] using pre-existing {existing} (no opp_scavetool)")
+        return existing
     sca_files = glob.glob(str(result_dir / "*.sca"))
     if not sca_files:
         return None
