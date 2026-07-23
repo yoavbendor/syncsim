@@ -43,7 +43,7 @@ treatment:
 |---|---|---|---|---|---|
 | S1 | Coarser timestamps (send-scheduled/receive-callback vs. INET's streaming-PHY SFD signals) | Precision-only | ns-3 has no native SFD hook; `PhyTxBegin`/`PhyRxBegin` traces exist but aren't used yet | Precision only — delay is real, positive, stable | 2 |
 | S2 | 1-step Pdelay/Sync (no `Pdelay_Resp_Follow_Up`/`Follow_Up`) | Precision-only | Simplicity; informationally identical to 2-step | Neither | 2 |
-| S3 | `neighborRateRatio = 1` | Precision-only | Not implemented | Precision only — provably sub-picosecond at these timescales | 2 |
+| S3 | `neighborRateRatio = 1` — ✅ **DONE (P2a)**: now derived per link, folded into peer-delay + residence math | Precision-only | ~~Not implemented~~ implemented P2a | Precision only — confirmed empirically (≤ 2 ns transient effect, steady state unchanged) | 2 |
 | S4 | Per-port gPTP termination, no transparent bridging | *Not a gap* | Deliberate — real 802.1AS gPTP uses a non-forwarded reserved multicast | N/A — arguably more correct than a transparent bridge | — |
 | **S5** | **Background congestion traffic injected at the bottleneck egress, not truly forwarded hop-by-hop** | **Shape-level, real root cause** | **Mainline ns-3's `CsmaChannel` is half-duplex shared-medium; a real forwarding attempt spuriously coupled every node's sync (confirmed empirically)** | **Shape — a real topological difference from INET** | 3 |
 | S6 | Approximate clock-driven burst scheduling (recomputed per-burst, not true mid-flight re-anchoring) | Precision-only | ns-3 has no `scheduleForAbsoluteTime` primitive | Precision only — still genuinely clock-driven | 2 |
@@ -176,17 +176,47 @@ Real improvements toward matching real 802.1AS behavior, each individually
 cheap enough to time-box, none expected to change any *observed number* (S1,
 S3, S6 are all already proven precision-only, not shape-level).
 
-### P2a — `neighborRateRatio` computation (closes S3)
+### P2a — `neighborRateRatio` computation (closes S3) — ✅ **DONE**
 
-Real 802.1AS derives the rate ratio from consecutive Pdelay measurement
-intervals at both link ends and folds it into the peer-delay/residence-time
-correction instead of assuming both ends tick at the same rate. **Honest
-framing, stated up front rather than discovered after the work**: S3's own
-existing documentation already establishes the omitted term is sub-picosecond
-at this project's drift magnitudes and measurement durations — this item's
-value is protocol completeness, not an expected change to any result. Cheap
-to implement (the math is well-understood); do it, but don't expect it to
-move a single number.
+**Status (done):** `neighborRateRatio` is now derived per link in
+`GptpEntity`'s peer-delay handling from two successive Pdelay exchanges
+(`neighborRateRatio = (t3_now − t3_prev) / (t4_now − t4_prev)` = neighbor-elapsed
+/ local-elapsed) and folded into **both** the peer-delay turnaround (`(t3−t2)`,
+measured on the neighbor's clock, divided by the ratio to reach local time) and
+the bridge residence-time correction (residence scaled by the slave port's
+ratio). A `>1%`-off-unity guard rejects a `t4` inflated by the M3 shared-medium
+artifact — the same outlier class P1a's running-minimum peer-delay filter
+rejects. Re-vendored byte-identical across all four scenario dirs; `gptp-spike`
+now prints the measured ratio (as a ppb residual).
+
+**Result — matches S3's long-standing prediction, essentially unchanged:** the
+term is real and live, but post-servo-lock the measured ratio converges to ~1
+(residual **< 0.5 ppb**) because the servo steers each local clock's *rate* to
+GM — so folding it in only bites during the brief pre-lock transient. Net
+observed effect, honestly reported (not forced to zero):
+
+- **Gate 2 (gptp-spike):** all PASS; one downsampled trajectory sample moved 1 ns
+  (`client2 −54.652 → −54.653 µs`), peer delay `sw↔client2 6.617 → 6.618 µs`;
+  peaks/finals/servos otherwise identical.
+- **M2 (nominal):** all PASS; a few transient peaks shifted ≤ 1 ns (last digit,
+  e.g. `coreClient 24.075 → 24.076 µs`); every final `0.000 µs`.
+- **M3 (congestion):** all PASS, **isolation shape exact** (16/17 nodes ratio
+  1.0x); `coreClient` congested peak `510.471 → 510.473 µs` (+2 ns, still 21.2x),
+  drop rate / backlog unchanged.
+- **M4 (feedback):** all PASS; `coreClient` steady-window delta `0.695 → 0.694 µs`
+  (still the sole non-zero node, still > 0.5 µs tol → "COUPLING OBSERVED"
+  unchanged); all 16 others exactly 0.000.
+
+All four scenarios deterministic (run-to-run byte-identical, twice each). The
+≤ 2 ns shifts are the residence-time rateRatio fold acting during the pre-lock
+transient; steady state is untouched, confirming S3 was precision-only.
+
+**Original plan (for reference):** Real 802.1AS derives the rate ratio from
+consecutive Pdelay measurement intervals at both link ends and folds it into the
+peer-delay/residence-time correction instead of assuming both ends tick at the
+same rate. S3's own documentation already established the omitted term is
+sub-picosecond at this project's drift magnitudes — protocol completeness, not an
+expected change to any result. Confirmed empirically above.
 
 ### P2b — Real 2-step Pdelay/Sync framing (closes S2)
 

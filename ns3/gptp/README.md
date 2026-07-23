@@ -98,10 +98,14 @@ like an unresolvable slave/master ordering problem dissolves.
 - **S2 — 1-step variants.** `Pdelay_Resp` carries (t2, t3) directly (vs 2-step
   `Pdelay_Resp` + `Pdelay_Resp_Follow_Up`); `Sync` carries origin + correction
   directly (vs `Sync` + `Follow_Up`). Same information, fewer frames.
-- **S3 — neighborRateRatio = 1.** Peer delay and residence are treated as
-  equal-rate durations; over a few microseconds the residual rate error is
-  sub-picosecond. Real 802.1AS carries the rate ratio for ptp4l-grade precision;
-  a first spike does not need it.
+- **S3 — neighborRateRatio — CLOSED (P2a).** Formerly assumed = 1. Now derived
+  per link from two successive Pdelay exchanges (`neighborRateRatio =
+  (t3_now − t3_prev) / (t4_now − t4_prev)` — neighbor-elapsed / local-elapsed)
+  and folded into the peer-delay turnaround and the bridge residence-time
+  correction. As S3 always predicted, no observed number moved to 3+ sig figs;
+  post-servo-lock the measured ratio is ~1 (< 0.5 ppb residual, printed in the
+  gate output) because the servo steers the local clock's *rate* to GM. See the
+  P2a note below.
 - **S4 — per-port termination, no `BridgeNetDevice`.** Real gPTP frames use a
   link-local reserved multicast that bridges do not forward; each port is a gPTP
   endpoint and the bridge regenerates Sync. So (unlike Phase 0) no transparent L2
@@ -184,6 +188,18 @@ hardening exists to fix M3's congested-peak magnitude (see `congestion/README.md
 shift is that fix's only visible footprint here, and it is a strict wash on the
 gated properties.
 
+**neighborRateRatio note (P2a — S3 closed).** The gate output now prints the
+per-link measured `neighborRateRatio` as a residual deviation from 1.0 in ppb.
+Post-lock all three links read `1 + 0.000 ppb` (residual < 0.5 ppb): the servo
+steers each local clock's *rate* to match GM, so once locked the neighbour and
+local clocks genuinely tick at the same rate and the measured ratio is ~1. Folding
+this into the peer-delay turnaround and residence-time math therefore leaves the
+Gate-2 numbers unchanged to 3+ sig figs — one downsampled trajectory sample moved
+by 1 ns (`client2 −54.652 → −54.653 µs` at t = 0.375 s, a pre-lock transient
+point), and the peer delay `sw↔client2` reads `6.618` vs `6.617 µs`; nothing else
+moved. This is exactly S3's long-standing prediction (sub-ps at these
+drift/timescales), now empirically confirmed rather than asserted.
+
 ### What this does and does not establish
 
 - **Does:** ns-3 *can* host a minimal but real, closed-loop 802.1AS mechanism —
@@ -192,8 +208,9 @@ gated properties.
   deterministically. R-GPTP is not a blocker. Gates 1 + 2 both hold → the POC's
   core "migration is viable" question is answered *yes* on the pinned ns-3.45.
 - **Does not (deferred to later phases):** no multi-hop residence bridges (M2 /
-  R-BRIDGE), no data-plane congestion coupling (M3/M4), no neighborRateRatio
-  (S3), no streaming-PHY-grade timestamps (S1), no IEEE TLV wire format / pcap.
+  R-BRIDGE), no data-plane congestion coupling (M3/M4), no
+  streaming-PHY-grade timestamps (S1), no IEEE TLV wire format / pcap.
+  (**S3 `neighborRateRatio` is now closed — P2a**, see the note above.)
   The servo is a hardened PI loop (damped proportional phase + bounded low-pass
   integral frequency + missed-Sync skip + a peer-delay outlier filter on its
   input), not a full adaptive ptp4l PI2 with spike-rejection state machine.

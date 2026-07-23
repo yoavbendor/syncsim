@@ -36,13 +36,21 @@
 //       what real 802.1AS splits into Sync + Follow_Up. The information content
 //       is identical; only the number of frames differs.
 //
-//   S3. neighborRateRatio = 1. Peer-delay and residence-time are computed
-//       treating both link ends as equal-rate clocks. Because every quantity
-//       that uses this (mean link delay, residence time) is a *duration* of a
-//       few microseconds, a residual rate error of even a few hundred ppm over
-//       it is sub-picosecond -- negligible for this spike. Real 802.1AS carries
-//       neighborRateRatio to hit ptp4l-grade precision; a first spike does not
-//       need it (explicitly permitted by the Phase 2 task).
+//   S3. neighborRateRatio -- CLOSED (P2a, Tier 2). Formerly assumed = 1 (both
+//       link ends treated as equal-rate clocks). Now DERIVED per port from two
+//       successive Pdelay exchanges: neighborRateRatio = (neighbor-elapsed) /
+//       (local-elapsed), comparing how far the responder's reported timestamp
+//       (t3) advanced against how far our own receive timestamp (t4) advanced
+//       between the two exchanges, and folded into BOTH the peer-delay math (the
+//       responder turnaround (t3-t2), measured on the neighbor's clock, is
+//       divided by the ratio to express it in our local time base) and the
+//       residence-time correction (a bridge's residence, measured on its local
+//       clock, is scaled by its upstream port's ratio to express it toward GM
+//       time). As S3 always documented and P2a's verification CONFIRMED: at this
+//       project's drift magnitudes (tens-hundreds of ppm) over microsecond
+//       durations the term is provably sub-picosecond, so no observed number
+//       moved to 3+ significant figures -- this closes S3 for protocol
+//       completeness, not to change any result.
 //
 //   S4. gPTP frames are terminated per-port (NOT transparently L2-forwarded).
 //       Phase 0's smoke test installed a BridgeNetDevice on sw; this spike does
@@ -203,6 +211,9 @@ class GptpEntity
     const std::string& GetName() const { return m_name; }
     // Measured mean link delay on a port (0 until first Pdelay completes).
     ns3::Time GetLinkDelay(uint32_t portIndex) const;
+    // Measured neighborRateRatio on a port (S3, P2a): neighbor rate / local rate
+    // (1.0 until two Pdelay exchanges establish it). For scenario reporting.
+    double GetNeighborRateRatio(uint32_t portIndex) const;
     uint32_t GetPortCount() const { return m_ports.size(); }
     uint32_t GetServoCount() const { return m_servoCount; }
 
@@ -215,6 +226,14 @@ class GptpEntity
         ns3::Time linkDelay{0};   // measured mean propagation delay (S1: incl. one serialization)
         uint16_t pdelaySeq{0};    // our outstanding Pdelay_Req seq
         ns3::Time pdelayT1{0};    // local tx time of our outstanding Pdelay_Req
+        // neighborRateRatio (S3, closed by P2a): neighbor clock rate / local
+        // clock rate on this link, estimated from consecutive Pdelay exchanges.
+        // 1.0 until the second exchange establishes it. rrPrevT3/rrPrevT4 hold
+        // the previous exchange's responder-tx (t3) and our-rx (t4) timestamps.
+        double neighborRateRatio{1.0};
+        bool haveRrPrev{false};
+        ns3::Time rrPrevT3{0};
+        ns3::Time rrPrevT4{0};
     };
 
     void SendFrame(uint32_t portIndex, const GptpHeader& hdr);

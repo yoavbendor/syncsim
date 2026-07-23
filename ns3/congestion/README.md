@@ -53,7 +53,16 @@ missed servo cycle). Every other switch egress carries only negligible gPTP, nev
 fills, and those nodes are untouched. **The asymmetry emerges from the shared-queue
 mechanism — it is not hand-coded per node.**
 
-## Simplifications (in addition to Phase-2's S1–S4, carried forward unchanged)
+## Simplifications (Phase-2's S1/S2/S4 carried forward; S3 closed by P2a)
+
+**S3 (`neighborRateRatio`) is closed as of P2a** — derived per link from
+consecutive Pdelay exchanges and folded into the peer-delay/residence math. Its
+only effect here was a **+2 ns** shift in `coreClient`'s congested peak
+(`510.471 → 510.473 µs`) and ≤ 1 ns on a few baseline peaks (last printed digit);
+the isolation shape, the drop rate, the backlog, and every gate are unchanged.
+The peer-delay outlier filter (P1a) already guards `neighborRateRatio` too — the
+same congestion-inflated `t4` that the running-minimum rejects is rejected by
+P2a's `>1%`-off-unity ratio guard. S1/S2/S4 carry forward unchanged.
 
 **S5 — background flows injected at their convergence egress.** The three flows
 are offered on `swCore`'s `coreClient`-facing device directly, rather than
@@ -109,13 +118,13 @@ descriptors that matter — line up.)
            node | hops |   ppm |  base peak |  cong peak |  ratio
   ----------------------------------------------------------------
          swCore |  1   |  50.0 |     7.975  |     7.975  |   1.0x
-     coreClient |  2   | 150.0 |    24.075  |   510.471  |  21.2x   <-- degrades
-            swA |  2   |  80.0 |    12.700  |    12.700  |   1.0x
+     coreClient |  2   | 150.0 |    24.076  |   510.473  |  21.2x   <-- degrades
+            swA |  2   |  80.0 |    12.701  |    12.701  |   1.0x
             swB |  2   | -60.0 |    10.050  |    10.050  |   1.0x
-            swC |  2   | 100.0 |    15.950  |    15.950  |   1.0x
+            swC |  2   | 100.0 |    15.951  |    15.951  |   1.0x
     clientsA[0] |  3   | 126.6 |    20.126  |    20.126  |   1.0x
     clientsA[1] |  3   |  42.7 |     6.495  |     6.495  |   1.0x
-    clientsA[2] |  3   |  -1.8 |     1.723  |     1.723  |   1.0x
+    clientsA[2] |  3   |  -1.8 |     1.722  |     1.722  |   1.0x
     clientsA[3] |  3   | -47.4 |     8.148  |     8.148  |   1.0x
     clientsB[0] |  3   | -52.4 |     8.961  |     8.961  |   1.0x
     clientsB[1] |  3   | 122.6 |    19.482  |    19.482  |   1.0x
@@ -181,7 +190,7 @@ linuxptp PI idea + a first-principles floor estimator, no ptp4l/INET source read
 ```
   [PASS] baseline (no traffic): every node still converges (|final| < 2 us)
   [PASS] congestion is real: bottleneck queue actually drops packets
-  [PASS] coreClient sync degrades under load (21.2x its baseline, 510.471 us)
+  [PASS] coreClient sync degrades under load (21.2x its baseline, 510.473 us)
   [PASS] every OTHER node stays within 5 us of its baseline (isolation)
 ```
 
@@ -195,8 +204,9 @@ linuxptp PI idea + a first-principles floor estimator, no ptp4l/INET source read
 - **Does not (deferred / simplified):** hop-by-hop L2 forwarding of the data
   (S5), full adaptive ptp4l-grade servo behavior (P1a hardens the loop to a
   bounded PI with missed-Sync skip + a peer-delay outlier filter, but not a full
-  spike-rejection state machine), IEEE TLV wire format / pcap. Carries S1–S4
-  forward unchanged; the gPTP model change is P1a's servo/peer-delay hardening.
+  spike-rejection state machine), IEEE TLV wire format / pcap. Carries S1/S2/S4
+  forward unchanged; **S3 (`neighborRateRatio`) is closed by P2a** (≤ 2 ns effect
+  here, see the Simplifications section); the P1a servo/peer-delay hardening stands.
 
 ### Honest licensing note
 

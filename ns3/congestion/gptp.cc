@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // syncsim ns-3 migration POC -- Phase 2 (R-GPTP). See gptp.h for the full
-// header: clean-room provenance, the licensing caveat, and the four
-// simplifications (S1 timestamping, S2 1-step variants, S3 rateRatio=1, S4
-// per-port termination instead of a transparent bridge).
+// header: clean-room provenance, the licensing caveat, and the simplifications
+// (S1 timestamping, S2 1-step variants, S3 neighborRateRatio -- CLOSED by P2a,
+// S4 per-port termination instead of a transparent bridge).
 
 #include "gptp.h"
 
@@ -104,6 +104,12 @@ GptpEntity::GetLinkDelay(uint32_t portIndex) const
     return m_ports.at(portIndex).linkDelay;
 }
 
+double
+GptpEntity::GetNeighborRateRatio(uint32_t portIndex) const
+{
+    return m_ports.at(portIndex).neighborRateRatio;
+}
+
 void
 GptpEntity::SendFrame(uint32_t portIndex, const GptpHeader& hdr)
 {
@@ -121,9 +127,11 @@ GptpEntity::SendFrame(uint32_t portIndex, const GptpHeader& hdr)
 //
 //     meanLinkDelay = ((t4 - t1) - (t3 - t2)) / 2
 //
-// t1,t4 are on the requester's local clock; t2,t3 on the responder's. Treating
-// both ends as equal-rate (S3, neighborRateRatio = 1) is fine here because both
-// (t4-t1) and (t3-t2) are few-microsecond durations. Per S1 the timestamps are
+// t1,t4 are on the requester's local clock; t2,t3 on the responder's. S3 is now
+// closed (P2a): neighborRateRatio is derived from consecutive Pdelay exchanges
+// and the responder turnaround (t3-t2) is divided by it to express it in local
+// time (see HandlePdelayResp). At these few-microsecond durations the correction
+// is sub-picosecond, so the measured delay is unchanged to 3+ sig figs. Per S1 the timestamps are
 // the send-fires / receive-callback-fires instants, so meanLinkDelay includes
 // one frame serialization time on top of the channel propagation delay -- a
 // real, small, positive, stable value, which is all Gate 2 needs.
@@ -180,9 +188,43 @@ GptpEntity::HandlePdelayResp(uint32_t portIndex, const GptpHeader& in)
     Time t1 = p.pdelayT1;
     Time t2 = in.GetTa();
     Time t3 = in.GetTb();
-    // meanLinkDelay = ((t4 - t1) - (t3 - t2)) / 2
-    Time rt = (t4 - t1) - (t3 - t2);
-    Time cand = rt / 2;
+
+    // neighborRateRatio (S3, closed by P2a). Between two successive Pdelay
+    // exchanges, compare how far the NEIGHBOR's clock advanced (its reported tx
+    // timestamp t3) against how far OUR clock advanced (our rx timestamp t4):
+    //   neighborRateRatio = (t3_now - t3_prev) / (t4_now - t4_prev)
+    // i.e. neighbor-elapsed / local-elapsed = neighbor rate relative to ours. A
+    // guard rejects physically-implausible ratios (>1% off unity), which also
+    // rejects a t4 inflated by the M3 shared-medium contention artifact (that
+    // balloons local-elapsed and drags the ratio far from 1) -- the same class of
+    // outlier the running-minimum peer-delay filter below rejects.
+    if (p.haveRrPrev)
+    {
+        double localElapsed = (t4 - p.rrPrevT4).GetSeconds();
+        double neighElapsed = (t3 - p.rrPrevT3).GetSeconds();
+        if (localElapsed > 0.0 && neighElapsed > 0.0)
+        {
+            double rr = neighElapsed / localElapsed;
+            if (rr > 0.99 && rr < 1.01)
+            {
+                p.neighborRateRatio = rr;
+            }
+        }
+    }
+    p.rrPrevT3 = t3;
+    p.rrPrevT4 = t4;
+    p.haveRrPrev = true;
+
+    // meanLinkDelay = ((t4 - t1) - (t3 - t2)/neighborRateRatio) / 2.
+    // The responder turnaround (t3 - t2) is measured on the NEIGHBOR's clock, so
+    // divide by neighborRateRatio to express it in our local time base before
+    // subtracting it from the local round trip (t4 - t1). With S3 closed this is
+    // the rate-consistent peer delay; at these drift/timescales the correction is
+    // sub-picosecond (P2a: no observed number moved), and in the 1-step framing
+    // (t3 - t2) is ~0 anyway, so the fold is exact and vanishingly small here.
+    double rttLocal = (t4 - t1).GetSeconds();
+    double turnaround = (t3 - t2).GetSeconds() / p.neighborRateRatio;
+    Time cand = ns3::Seconds((rttLocal - turnaround) / 2.0);
 
     // Peer-delay OUTLIER FILTER (P1a). The true link delay is a physical FLOOR
     // (propagation + one serialization, S1) and static for a given link;
@@ -286,8 +328,14 @@ GptpEntity::RelayDownstream(Time originTs,
     Time sendLocal = m_clock->GetLocalTime();
     Time residence = sendLocal - slaveRecvLocal; // local elapsed since Sync receipt
     // correctionField accumulates: upstream correction + this link's peer delay
-    // + our residence time. (S3: residence taken on our local clock, rateRatio=1.)
-    Time newCorr = upstreamCorrection + slaveLinkDelay + residence;
+    // + our residence time. (S3 closed by P2a: the residence is measured on OUR
+    // local clock, so scale it by the slave port's neighborRateRatio -- our
+    // upstream neighbor's rate relative to ours, the best available proxy for the
+    // rate toward GM -- to express it in the upstream/GM time base before folding
+    // it in. At these timescales this is a sub-picosecond adjustment.)
+    double rr = (m_slavePort >= 0) ? m_ports[m_slavePort].neighborRateRatio : 1.0;
+    Time residenceCorrected = ns3::Seconds(residence.GetSeconds() * rr);
+    Time newCorr = upstreamCorrection + slaveLinkDelay + residenceCorrected;
     for (uint32_t i = 0; i < m_ports.size(); ++i)
     {
         if (!m_ports[i].isMaster)

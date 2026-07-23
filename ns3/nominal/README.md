@@ -178,10 +178,22 @@ later — so a little extra drift accumulates before the first correction. Real,
 not an artifact.)
 
 Our absolute numbers differ from INET's in detail (different seeded drift draws,
-coarser S1 timestamping, unity `neighborRateRatio` per S3) — but per the POC
-plan the gate is the **mechanism** (every node converges near 0 across all hop
-depths, peak tracks local drift, no unbounded compounding with depth), not the
-digits. That mechanism reproduces faithfully.
+coarser S1 timestamping) — but per the POC plan the gate is the **mechanism**
+(every node converges near 0 across all hop depths, peak tracks local drift, no
+unbounded compounding with depth), not the digits. That mechanism reproduces
+faithfully.
+
+**S3 note (closed by P2a).** `neighborRateRatio` is now derived per link from
+consecutive Pdelay exchanges and folded into the peer-delay and residence-time
+math (was assumed = 1). As S3 always predicted, this moved essentially nothing:
+a handful of **transient-peak** values shifted by **≤ 1 ns** (the last printed
+digit — e.g. `coreClient` peak `24.075 → 24.076 µs`, hops=2 max `24.075 →
+24.076`) and every node's **final** offset is unchanged at `0.000 µs`. The
+reason is physical: the servo steers each local clock's *rate* to match GM, so
+post-lock the measured `neighborRateRatio` converges to ~1 (< 0.5 ppb residual)
+— the fold only bites during the brief pre-lock transient, where residence is
+scaled by the instantaneous relative drift, hence the ≤ 1 ns peak shift. The M2
+gate is unchanged (all 18 nodes converge, all PASS).
 
 ## What this does and does not establish
 
@@ -193,9 +205,10 @@ digits. That mechanism reproduces faithfully.
   drift and does not compound monotonically with depth. R-BRIDGE is not a
   blocker.
 - **Does not (deferred):** data-plane congestion coupling (M3/M4 — this run has
-  no background/burst traffic and no finite-queue contention), `neighborRateRatio`
-  (S3), streaming-PHY-grade timestamps (S1), IEEE TLV wire format / pcap. Carries
-  forward all four Phase-2 simplifications (S1–S4) unchanged.
+  no background/burst traffic and no finite-queue contention),
+  streaming-PHY-grade timestamps (S1), IEEE TLV wire format / pcap. Carries
+  forward S1/S2/S4 unchanged; **S3 (`neighborRateRatio`) is closed by P2a**
+  (see the S3 note above — protocol completeness, ≤ 1 ns transient effect).
 
 ### Honest licensing note
 

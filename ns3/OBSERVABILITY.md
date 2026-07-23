@@ -162,7 +162,7 @@ drops nothing, and stays near-empty.
 ### feedback (M4) — exit 0, PASS
 
 Offsets sit at baseline except `coreClient`, whose steady-window peak shows the
-sub-µs, single-node coupling P1a surfaced (`0.695 µs` delta; all 16 others exactly
+sub-µs, single-node coupling P1a surfaced (`0.694 µs` delta; all 16 others exactly
 0 — see `feedback/README.md`); the bottleneck sees 87.0 % drop (870,441 ppm) from
 the aligned microbursts (matching the C++ report's ~88 %) and a `queueLength:vector`
 backlog spiking to its 20-packet cap (mean 0.97, the bursty regime).
