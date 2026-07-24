@@ -306,17 +306,18 @@ point-to-point topology: every frame sent by one device is received by exactly
 one other, so it's captured exactly once, just filed under the receiving
 device's `.pcap` instead of duplicated under both link ends. Since
 `SimpleNetDevice` doesn't carry a real Ethernet header on the wire (addressing
-is out-of-band via a `SimpleTag`), the hook synthesizes one (14-byte
-dst/src/ethertype) so the capture is genuinely classic-Ethernet, DLT_EN10MB —
-`ns3/scripts/check_pcap_gptp.py` parses it unchanged from the old CSMA format.
+is out-of-band via a `SimpleTag`), the hook synthesizes one (14-byte dst=gPTP
+multicast for gPTP / src / ethertype) so the capture is genuinely classic-Ethernet,
+DLT_EN10MB — dissectable by tshark's PTPv2 dissector and by
+`ns3/scripts/check_pcap_gptp.py`.
 
-Verified: a 5s `--pcapPrefix` run wrote 34 non-empty per-device `.pcap` files
-(one per device, matching every link in the topology);
-`check_pcap_gptp.py` against the whole directory reports genuine, parseable
-gPTP traffic with all five message types present (including the 2-step
-`PdelayRespFollowUp`/`FollowUp`), exit 0 PASS. With `--pcapPrefix` unset,
-stdout stays byte-identical and zero files are written (verified, gate
-unaffected).
+Verified (P3c): a 3s `--pcapPrefix` run wrote 34 non-empty per-device `.pcap`
+files; **tshark's own unmodified PTPv2 dissector parses every frame with zero
+malformed** across all 34, and `check_pcap_gptp.py` reports genuine, parseable
+gPTP traffic with all six 802.1AS message types present (Sync, Pdelay_Req,
+Pdelay_Resp, Follow_Up, Pdelay_Resp_Follow_Up, Announce), exit 0 PASS. With
+`--pcapPrefix` unset, stdout stays byte-identical and zero files are written
+(verified, gate unaffected).
 
 ## What this does and does not establish
 
@@ -330,15 +331,21 @@ unaffected).
   `SimpleNetDevice`/`SimpleChannel` links — **S5 closed** — and the isolation
   finding survives that (all 16 other nodes still exactly 1.0x), demonstrated over
   real forwarding rather than egress injection.
+- **Also does (new — P3c):** the captured wire format is now **byte-exact IEEE
+  802.1AS** on the real PTP EtherType 0x88F7 to the reserved gPTP multicast —
+  **genuinely Wireshark/tshark-dissectable**, verified zero-malformed (**S6-adjacent
+  wire-format gap closed**). Honest consequence: the real frames are larger than
+  the old 19-byte header, so per S1 the measured peer delay grows and the congested
+  peak shifted `550.854 → 513.430 µs` (22.6× → 21.5×) with congested servo count
+  `125 → 114` — a frame-size effect on the loss-sensitive path (isolation shape
+  still exact, drop 29.66% unchanged, gate PASS). See `ns3/gptp/WIRE_FORMAT.md`.
 - **Does not (deferred / simplified):** full adaptive ptp4l-grade servo behavior
   (P1a hardens the loop to a bounded PI with missed-Sync skip + a peer-delay
-  outlier filter, but not a full spike-rejection state machine), and
-  **IEEE-TLV-dissectable** wire format (Tier 3) — this project's own 19-byte
-  `GptpHeader`, not real 802.1AS TLVs, is what gets captured (pcap capture
-  itself is restored, see the pcap section above).
+  outlier filter, but not a full spike-rejection state machine).
   Carries S1 forward unchanged and S4 is deliberate; **S2 (2-step framing) closed
   by P2b**, **S3 (`neighborRateRatio`) closed by P2a**, **S5 (hop-by-hop
-  forwarding) closed by P3a**; the P1a servo/peer-delay hardening stands.
+  forwarding) closed by P3a**, **the real 802.1AS wire format closed by P3c**;
+  the P1a servo/peer-delay hardening stands.
 
 ### Honest licensing note
 

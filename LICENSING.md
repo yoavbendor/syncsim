@@ -52,23 +52,29 @@ permissive. This is stated in detail in `ns3/clock/README.md`,
 because it's the crux of why "the ns-3 track is Apache-2.0" is a claim about
 authorship, not about the shape of the thing you'd actually ship.
 
-## Current decision: dual-track, OMNeT++/INET remains authoritative
+## Current decision: ns-3 is the primary track; OMNeT++/INET is kept as a reference cross-check
 
-Per `NS3_MIGRATION_POC_PLAN.md`'s Phase 5 decision gate — explicitly reopened
-and decided, not defaulted into — this repository stays **dual-track**:
-OMNeT++/INET remains the authoritative simulator for M1–M5 (the original,
-highest-fidelity, most complete implementation, with capabilities the ns-3
-track does not yet have: pcap capture/replay, the YAML topology DSL, GUI/IDE
-tooling, and a servo/timestamping fidelity the ns-3 track's own READMEs
-disclose real, specific gaps against). The `ns3/` track is real, gated in CI,
-and published on the same Pages site — a standing, commercially-usable
-(GPLv2) cross-check and the answer to "is a licensing escape hatch viable,"
-not (yet) a replacement. `NS3_MIGRATION_SURVEY.md` and
-`NS3_MIGRATION_POC_PLAN.md` are the full record of that decision and what
-would need to be true to revisit it.
+**Superseded Phase 5 decision, revisited.** `NS3_MIGRATION_POC_PLAN.md`'s
+original Phase 5 gate chose dual-track with OMNeT++/INET authoritative,
+reasoning that the ns-3 track still carried real, disclosed gaps (pcap
+capture/replay, IEEE-dissectable wire format, a trustworthy servo under
+congestion, real hop-by-hop data forwarding). Tiers 1–3 of
+`NS3_PARITY_PLAN.md` closed every one of those in turn — P1a's servo
+hardening, P2c/P3c's pcap capture (now byte-exact IEEE 802.1AS, tshark-
+dissectable), and P3a's real full-duplex hop-by-hop forwarding — so the
+reasoning behind the original Phase 5 choice no longer holds.
+
+**As of the P3c wire-format milestone, this repository's primary track is
+`ns3/` (GPLv2, commercially usable, no Academic Public License restriction).
+OMNeT++/INET is kept as a reference implementation for cross-checking new
+work, not the default place development happens.** New scenario/feature work
+targets the ns-3 track first; OMNeT++/INET stays green and gated in CI as the
+independent, highest-fidelity cross-check it has been from the start, but is
+no longer where "the real answer" is assumed to live by default.
 
 If your own use case specifically needs to avoid the OMNeT++ kernel's
-Academic Public License (e.g. any commercial use), use the `ns3` Docker
-target — see `ns3/README.md` for what it does and does not yet cover before
-relying on it in place of the OMNeT++ track.
+Academic Public License (e.g. any commercial use), the `ns3` Docker target is
+now the primary, recommended path rather than a fallback — see `ns3/README.md`.
+`NS3_MIGRATION_SURVEY.md`, `NS3_MIGRATION_POC_PLAN.md`, and `NS3_PARITY_PLAN.md`
+are the full record of how this decision was reached and revisited.
 </content>

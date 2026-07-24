@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Reproduces ns3/congestion/congestion-topology.cc (M3) on the generic engine:
+# the M2 18-node topology with a finite real-dropping DropTailQueue (cap 10) on
+# every switch egress, plus three ~50 Mbps background flows that ORIGINATE at
+# clientsA/B/C[0] and are L2-forwarded hop-by-hop (client -> zone switch -> swCore
+# -> coreClient) onto the single swCore->coreClient 100 Mbps egress -- a
+# ~150-into-100 oversubscription. Data + gPTP share that bottleneck queue.
+#
+# compare_baseline: true runs the scenario twice (traffic off, then on) and prints
+# the isolation table. The M3 finding: coreClient (the sink, the only node sharing
+# the congested egress queue) degrades; all 16 other nodes hold their baseline
+# peak. The forwarding path is DERIVED from the link graph (BFS from the sink),
+# not hand-coded.
+
+sim:
+  time_s: 60.0
+  sync_interval_ms: 125.0
+  pdelay_interval_ms: 50.0
+
+nodes:
+  - {name: gm,         role: gm,     drift_ppm: 0.0}
+  - {name: swCore,     role: switch, drift_ppm: 50.0}
+  - {name: coreClient, role: client, drift_ppm: 150.0}
+  - {name: swA,        role: switch, drift_ppm: 80.0}
+  - {name: swB,        role: switch, drift_ppm: -60.0}
+  - {name: swC,        role: switch, drift_ppm: 100.0}
+  - {name: "clientsA[0]", role: client, drift_ppm: 126.61}
+  - {name: "clientsA[1]", role: client, drift_ppm: 42.74}
+  - {name: "clientsA[2]", role: client, drift_ppm: -1.77}
+  - {name: "clientsA[3]", role: client, drift_ppm: -47.36}
+  - {name: "clientsB[0]", role: client, drift_ppm: -52.37}
+  - {name: "clientsB[1]", role: client, drift_ppm: 122.64}
+  - {name: "clientsB[2]", role: client, drift_ppm: -159.65}
+  - {name: "clientsB[3]", role: client, drift_ppm: 33.92}
+  - {name: "clientsC[0]", role: client, drift_ppm: 175.62}
+  - {name: "clientsC[1]", role: client, drift_ppm: 50.44}
+  - {name: "clientsC[2]", role: client, drift_ppm: 128.78}
+  - {name: "clientsC[3]", role: client, drift_ppm: 23.71}
+
+# queue_cap 10 on every link whose switch endpoint is an egress -- the finite
+# DropTailQueue applies to the switch-side device of each link (client-side
+# devices stay unbounded), reproducing the hand-coded "cap 10 on every switch
+# egress port" exactly. The bottleneck is swCore's coreClient-facing egress.
+links:
+  - {a: gm,     b: swCore,     master: a, queue_cap: 10, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swCore, b: coreClient, master: a, queue_cap: 10, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swCore, b: swA,        master: a, queue_cap: 10, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swCore, b: swB,        master: a, queue_cap: 10, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swCore, b: swC,        master: a, queue_cap: 10, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swA, b: "clientsA[0]", master: a, queue_cap: 10, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swA, b: "clientsA[1]", master: a, queue_cap: 10, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swA, b: "clientsA[2]", master: a, queue_cap: 10, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swA, b: "clientsA[3]", master: a, queue_cap: 10, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swB, b: "clientsB[0]", master: a, queue_cap: 10, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swB, b: "clientsB[1]", master: a, queue_cap: 10, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swB, b: "clientsB[2]", master: a, queue_cap: 10, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swB, b: "clientsB[3]", master: a, queue_cap: 10, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swC, b: "clientsC[0]", master: a, queue_cap: 10, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swC, b: "clientsC[1]", master: a, queue_cap: 10, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swC, b: "clientsC[2]", master: a, queue_cap: 10, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swC, b: "clientsC[3]", master: a, queue_cap: 10, data_rate: 100Mbps, delay_us: 1.0}
+
+traffic:
+  mode: background_flows
+  flows: 3
+  mean_gap_us: 160.0        # exponential inter-packet gap, per congestion.ini
+  payload_bytes: 946        # 1000B - 54B
+  start_s: 1.0              # let gPTP converge first, then turn on congestion
+  sources: ["clientsA[0]", "clientsB[0]", "clientsC[0]"]
+  sink: coreClient
+
+report:
+  compare_baseline: true
+  isolation_tol_us: 5.0
+  degrade_factor: 5.0
+  module_root: Nominal

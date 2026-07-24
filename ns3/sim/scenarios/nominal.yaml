@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Reproduces ns3/nominal/nominal-topology.cc (M2 / R-BRIDGE) on the generic
+# engine: 18 nodes across three hop depths from the GM -- gm -> swCore (hop 1) ->
+# {coreClient, swA, swB, swC} (hop 2) -> 12 zone clients (hop 3). The gate: every
+# node converges to ~0 across all three hop depths, proving hop-by-hop peer-delay
+# + residence-time propagation through a chain of time-aware bridges.
+#
+# Client drift rates: the original driver DREW these from a seeded ns-3
+# UniformRandomVariable(-200,200); here they are pinned explicitly (the values
+# that driver's seed=1/run=1 draw prints), so the config is self-contained and
+# deterministic without depending on RNG draw order. Hop depth is DERIVED from the
+# link graph (BFS from gm), not listed here.
+
+sim:
+  time_s: 60.0
+  sync_interval_ms: 125.0
+  pdelay_interval_ms: 50.0
+
+nodes:
+  - {name: gm,         role: gm,     drift_ppm: 0.0}
+  - {name: swCore,     role: switch, drift_ppm: 50.0}
+  - {name: coreClient, role: client, drift_ppm: 150.0}
+  - {name: swA,        role: switch, drift_ppm: 80.0}
+  - {name: swB,        role: switch, drift_ppm: -60.0}
+  - {name: swC,        role: switch, drift_ppm: 100.0}
+  - {name: "clientsA[0]", role: client, drift_ppm: 126.61}
+  - {name: "clientsA[1]", role: client, drift_ppm: 42.74}
+  - {name: "clientsA[2]", role: client, drift_ppm: -1.77}
+  - {name: "clientsA[3]", role: client, drift_ppm: -47.36}
+  - {name: "clientsB[0]", role: client, drift_ppm: -52.37}
+  - {name: "clientsB[1]", role: client, drift_ppm: 122.64}
+  - {name: "clientsB[2]", role: client, drift_ppm: -159.65}
+  - {name: "clientsB[3]", role: client, drift_ppm: 33.92}
+  - {name: "clientsC[0]", role: client, drift_ppm: 175.62}
+  - {name: "clientsC[1]", role: client, drift_ppm: 50.44}
+  - {name: "clientsC[2]", role: client, drift_ppm: 128.78}
+  - {name: "clientsC[3]", role: client, drift_ppm: 23.71}
+
+links:
+  # gm sources Sync; swCore is slave toward gm, master toward its four children.
+  - {a: gm,     b: swCore,     master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swCore, b: coreClient, master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swCore, b: swA,        master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swCore, b: swB,        master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swCore, b: swC,        master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  # each zone switch is master toward its four clients.
+  - {a: swA, b: "clientsA[0]", master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swA, b: "clientsA[1]", master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swA, b: "clientsA[2]", master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swA, b: "clientsA[3]", master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swB, b: "clientsB[0]", master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swB, b: "clientsB[1]", master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swB, b: "clientsB[2]", master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swB, b: "clientsB[3]", master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swC, b: "clientsC[0]", master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swC, b: "clientsC[1]", master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swC, b: "clientsC[2]", master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swC, b: "clientsC[3]", master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+
+traffic:
+  mode: none
+
+report:
+  compare_baseline: false
+  final_tol_us: 2.0
+  module_root: Nominal

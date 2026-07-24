@@ -324,8 +324,10 @@ main(int argc, char* argv[])
     };
     auto link = [&](int a, int b, bool aIsMaster, bool aIsSwitch, bool bIsSwitch) {
         NetDeviceContainer dv = csma.Install(NodeContainer(nodes.Get(a), nodes.Get(b)));
-        uint32_t pa = ent[a]->AddPort(dv.Get(0), dv.Get(1)->GetAddress(), aIsMaster);
-        uint32_t pb = ent[b]->AddPort(dv.Get(1), dv.Get(0)->GetAddress(), !aIsMaster);
+        // P3c: gPTP frames go to the reserved 802.1AS multicast, not peer unicast.
+        Address gptpMc = syncsim::GptpMulticastAddress();
+        uint32_t pa = ent[a]->AddPort(dv.Get(0), gptpMc, aIsMaster);
+        uint32_t pb = ent[b]->AddPort(dv.Get(1), gptpMc, !aIsMaster);
         dv.Get(0)->SetReceiveCallback(MakeBoundCallback(&RxTrampoline, ent[a].get(), pa));
         dv.Get(1)->SetReceiveCallback(MakeBoundCallback(&RxTrampoline, ent[b].get(), pb));
         if (aIsSwitch)
@@ -387,6 +389,11 @@ main(int argc, char* argv[])
     }
     // GM sources Sync every syncInterval.
     Simulator::Schedule(syncInterval, &syncsim::GptpEntity::SendSync, ent[GM].get(), syncInterval);
+    // GM also emits Announce on the same cadence (P3c, additive wire-realism).
+    // Scheduled AFTER SendSync so its frame enqueues behind the Sync/Follow_Up
+    // burst each cycle and never delays a measured frame.
+    Simulator::Schedule(syncInterval, &syncsim::GptpEntity::SendAnnounce, ent[GM].get(),
+                        syncInterval);
 
     // P1b: queueLength:vector sampling over the whole run (5 ms cadence), only
     // when --resultDir is set. Read-only, so unset => byte-identical to before.
@@ -396,10 +403,11 @@ main(int argc, char* argv[])
                             Seconds(simTime));
     }
 
-    // P2c: opt-in pcap on every CSMA device (gPTP path). Off by default (empty
-    // prefix) so gates/stdout are byte-identical when unset. Reuses Phase 0's
-    // EnablePcapAll; captures this project's own GptpHeader wire format (verify
-    // with ns3/scripts/check_pcap_gptp.py -- not Wireshark-dissectable 802.1AS).
+    // P2c/P3c: opt-in pcap on every CSMA device (gPTP path). Off by default
+    // (empty prefix) so gates/stdout are byte-identical when unset. Reuses Phase
+    // 0's EnablePcapAll; captures the byte-exact IEEE 802.1AS wire format (P3c) --
+    // now genuinely dissectable by tshark/Wireshark's own PTPv2 dissector (verify
+    // with ns3/scripts/check_pcap_gptp.py and `tshark -r <f> -Y ptp`).
     if (!pcapPrefix.empty())
     {
         csma.EnablePcapAll(pcapPrefix, false);

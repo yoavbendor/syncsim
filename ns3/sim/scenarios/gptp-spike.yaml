@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Reproduces ns3/gptp/gptp-spike.cc (Gate 2 / M1 signature) on the generic
+# YAML-driven engine: a grandmaster, one time-aware bridge (slave toward gm,
+# master toward two clients), and two end stations, at M1's baseline drift rates.
+# The gate mechanism: every node converges to ~0, peak scales with |drift|
+# (client2 350ppm > client1 200ppm > sw 80ppm), roughly proportional.
+#
+# NOTE: the engine's transport is full-duplex SimpleNetDevice for all scenarios
+# (the S5-fix transport), whereas the original gptp-spike.cc used CSMA. The gPTP
+# mechanism is transport-agnostic, so the convergence/ordering/proportionality
+# all hold; the only visible difference is a small peer-delay / transient-peak
+# shift from the different serialization path (see ns3/sim/README.md).
+
+sim:
+  time_s: 20.0
+  sync_interval_ms: 125.0
+  pdelay_interval_ms: 50.0
+
+nodes:
+  - {name: gm,      role: gm,     drift_ppm: 0.0}
+  - {name: sw,      role: switch, drift_ppm: 80.0}
+  - {name: client1, role: client, drift_ppm: 200.0}
+  - {name: client2, role: client, drift_ppm: -350.0}
+
+links:
+  - {a: gm, b: sw,      master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: sw, b: client1, master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: sw, b: client2, master: a, queue_cap: 0, data_rate: 100Mbps, delay_us: 1.0}
+
+traffic:
+  mode: none
+
+report:
+  compare_baseline: false
+  final_tol_us: 2.0
+  module_root: Minimal
