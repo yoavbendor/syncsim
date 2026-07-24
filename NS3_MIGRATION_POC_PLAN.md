@@ -129,6 +129,15 @@ residence-time bridges (**R-BRIDGE**, M2) and fidelity divergence from INET
 - Otherwise (recommended lower-risk end state): keep **both** — INET authoritative,
   ns-3 as a standing GPL cross-check (this also closes out M6).
 
+**Superseded.** The original decision (dual-track, INET authoritative) held
+through the initial migration but was revisited once `NS3_PARITY_PLAN.md`'s
+Tiers 1–3 closed every gap that decision was conditioned on — the servo
+trust issue (P1a), pcap capture (P2c, then byte-exact IEEE 802.1AS in P3c),
+and real hop-by-hop data forwarding (P3a). **ns-3 is now this repository's
+primary track; OMNeT++/INET is kept as a reference implementation for
+cross-checking new work.** See `LICENSING.md`'s decision section for the
+current record.
+
 ---
 
 ## What carries over vs. gets rebuilt (scope honesty)

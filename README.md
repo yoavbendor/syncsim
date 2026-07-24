@@ -26,10 +26,12 @@ syncsim's own code (this repo's `.ned`/`.ini`, scripts, Dockerfile, and the
 fresh at Docker build time and carry their own separate terms — notably, the
 OMNeT++ *kernel* itself is Academic Public License (non-commercial; commercial
 use requires OMNEST), which is the actual driver behind the parallel `ns3/`
-track (GPLv2, commercial-OK). See **[LICENSING.md](LICENSING.md)** for the
-full breakdown of what governs what, and `NS3_MIGRATION_SURVEY.md`/
-`NS3_MIGRATION_POC_PLAN.md` for why `ns3/` exists and why this repo stays
-dual-track rather than cutting over.
+track (GPLv2, commercial-OK). **As of the P3c wire-format milestone, `ns3/` is
+this repo's primary track; OMNeT++/INET is kept as a reference cross-check,
+not the default place new work happens** — see
+**[LICENSING.md](LICENSING.md)** for the full breakdown and
+`NS3_MIGRATION_SURVEY.md`/`NS3_MIGRATION_POC_PLAN.md`/`NS3_PARITY_PLAN.md` for
+how that decision was reached and revisited.
 
 ## Visual results (GitHub Pages)
 
