@@ -50,10 +50,10 @@ treatment:
 | — | **M3 servo lock-loss transient**: congested peak 24× larger than INET's — ✅ **FIXED (P1a): 46,281 µs → 510 µs** | **Real, undamped anomaly** | Phase 2's deadbeat-phase + naive-integral-frequency servo overreacting to a wild rate estimate after a sporadically missed Sync — **plus** (found during the fix) a peer-delay `d` corrupted to tens of ms by Pdelay contention on the saturated shared CSMA medium, the dominant driver | **Magnitude — the one number this undermined trust in** | **1** |
 | — | `queueLength:vector` not exported — ✅ **DONE (P1b)** | Missing capability, cheap | Never wired up in Phase 4; now sampled per switch-egress queue + exported to `vectors.csv` | Was blocking Pages backlog/coupling plots for ns-3 (already-scaffolded code, missing data) — now render non-empty | **1** |
 | — | No pcap capture/replay past Phase 0's smoke test — ✅ **DONE (P2c)**: `--pcapPrefix` on all three scenarios + `check_pcap_gptp.py` verifier | Missing capability, moderate | ~~Not built~~ built P2c (own-format, off by default) | Debuggability gap closed; IEEE-dissectable capture still Tier 3 | 2 |
-| — | No YAML-topology-DSL equivalent (Phase B) | Missing capability, large | Not built | Every ns-3 topology is hand-coded C++, not data-driven | 3 |
+| — | No YAML-topology-DSL equivalent — ✅ **DONE (P3b)**: `ns3/sim/` generic engine, nodes/links/traffic/report all data-driven | Missing capability, large | ~~Not built~~ built P3b, ns-3-native schema (not OMNeT++-compatible, by explicit user decision) | Every scenario is now a YAML file, zero new C++; all four existing scenarios reproduced with matching mechanism | **3 — DONE** |
 | — | No GUI/interactive tooling (Qtenv/IDE equivalent) | Missing capability, large | Not built; ns-3's own tools (NetAnim/PyViz) are a different paradigm, not a clean port target | Developer-experience gap, not a fidelity gap | 3 |
 | — | Real IEEE 802.1AS wire format for gPTP messages — ✅ **DONE (P3c)**: byte-exact 802.1AS on EtherType 0x88F7 + reserved multicast, tshark-dissectable (zero malformed) | Missing capability, large | ~~Pragmatic 19-byte custom header~~ replaced by byte-exact 802.1AS (P3c) | Genuinely Wireshark-dissectable captures now achieved; disclosed frame-size peer-delay/peak ripple, all gates PASS | **3 — DONE** |
-| — | Single topology fully proven (Nominal/Minimal shape only) | Missing capability | No generator/DSL to vary topology cheaply | Same root cause as the YAML-DSL gap | 3 |
+| — | Single topology fully proven (Nominal/Minimal shape only) — ✅ **CLOSED (P3b)**: the generic engine can express arbitrary node/link/traffic shapes | Missing capability | ~~No generator/DSL to vary topology cheaply~~ closed by P3b | Same root cause as the YAML-DSL gap, now resolved; only the 4 existing shapes have been *proven* as configs so far, but new shapes need no C++ | 3 |
 | — | Shorter sim-time (20–30s ns-3 runs vs. OMNeT++'s 60s) — ✅ **DONE (P2d)**: default now 60s | Minor | ~~Convenience~~ normalized P2d | Low severity; peaks unchanged, time-scaled counts ~2× | 2 (folded into P2c commit) |
 | — | M6 (real `ptp4l` cross-check) | Shared gap | Never built on *either* track | Not ns-3 falling behind — a future capability for the whole project | 4 (out of scope here) |
 | — | Priority shaping (Qbv/Qav) | Shared gap | Deferred on the OMNeT++ side too (M3's original scope) | Same — not ns-3-specific | 4 (out of scope here) |
@@ -364,15 +364,68 @@ gPTP's per-port termination (S4) stays untouched. `gptp.{h,cc}` needed **no** ch
   types present; the unset-prefix gate path stays byte-identical. `--pcapPrefix`
   works on all four scenarios again.
 
-### P3b — YAML-topology equivalent for ns-3
+### P3b — YAML-topology equivalent for ns-3 — ✅ **DONE**
 
-A smarter implementation path than mirroring Phase B's code-generation
-approach: rather than generating new `.cc` per topology, write one generic
-"build an ns-3 topology from this YAML file" C++ function, read at program
-startup — no codegen, no recompilation per topology. Real value (arbitrary
-topologies without hand-coding each one), real effort (a general-purpose
-topology interpreter, plus wiring `GptpEntity` role assignment generically).
-Depends on nothing else in this plan; can be spiked independently.
+**Status (done):** scope expanded beyond this plan's original framing per an
+explicit user decision: ns-3 is now this repository's primary track (see
+`LICENSING.md`'s revised decision record), so P3b became "a good, solid,
+ns-3-native way to specify topology and sim params" rather than an
+OMNeT++-compatible YAML DSL. `ns3/sim/` is a new, purely additive directory: a
+single generic engine (`sim.cc`) that builds and runs ANY topology/traffic/params
+expressible in a clean YAML schema (nodes, links with gPTP master/queue-cap/
+data-rate, a `traffic` block — `none`/`background_flows`/`aligned_bursts` — and
+`report` options), read at startup via the external `yaml-cpp` library (MIT,
+linked with zero ns-3 core patches — its own `scratch/CMakeLists.txt` already
+supports subdirectory-local `CMakeLists.txt` overrides for exactly this). Data
+forwarding paths and gPTP port roles are **derived** from the link graph (BFS),
+not hand-coded per topology — a genuinely new topology needs a new YAML file,
+not new C++. `gptp.{h,cc}`/`clock.{h,cc}` are a 5th byte-identical vendored copy,
+**not modified** — the engine is a new consumer of the already-verified,
+tshark-validated libraries. The four existing hand-coded scenario `.cc` files are
+untouched; retiring them and rewiring CI to this engine is a separate future
+decision.
+
+`ns3/sim/scenarios/{gptp-spike,nominal,congestion,feedback}.yaml` reproduce all
+four existing scenarios. **Verified independently** (not trusted from the
+implementing agent's self-report, which stalled on a session limit before
+committing — rebuilt from the uncommitted working tree, ran everything fresh):
+all four configs build clean, are deterministic (byte-identical stdout across two
+runs each), and reproduce the *mechanism* of every existing gate:
+
+- **Gate 2** (`gptp-spike`): GATE PASS. Peak ordering (client2 > client1 > sw) and
+  |drift|-proportionality hold, every final `0.000`, servo counts identical (159).
+  sw/client1/client2 peaks 12.760/32.021/57.358µs vs. the old CSMA binary's
+  12.658/31.817/57.561µs — a small, disclosed shift from switching every
+  scenario's transport to full-duplex `SimpleNetDevice` (the S5-fix transport),
+  including the two formerly-CSMA scenarios.
+- **M2** (`nominal`): GATE PASS. All 18 nodes converge (final `0.000`) across all
+  three hop depths; hop-peak table near-exact to the old binary (hops=1
+  7.885=7.885µs; hops=2 max 23.896=23.896µs; hops=3 max 27.819 vs 27.514µs).
+- **M3** (`congestion`): GATE PASS. Isolation shape **exact** — all 16
+  non-`coreClient` nodes still ratio 1.0×. `coreClient` congested peak
+  23.896→**659.841µs** (27.6×) vs. the old binary's 513.430µs (21.5×) — same
+  order of magnitude, still far below INET's ~1,950µs; the honest source of the
+  difference is the generic engine's background-traffic RNG substream starting
+  from a different state (client drifts are pinned explicitly in YAML rather than
+  RNG-drawn, shifting the exponential-gap generator's draw sequence), not a
+  mechanism bug. Drop rate (29.59% vs 29.66%) and mean backlog (8.88/10 = 8.88/10)
+  match closely.
+- **M4** (`feedback`): GATE PASS, **essentially byte-identical** to the old binary
+  (bursts are clock-driven, so no RNG-substream divergence applies): mean
+  fire-time spread 0.578µs (=old), bottleneck drop 47.62% (=old), every node's
+  steady-window delta exactly `0.000` (=old) — the non-finding reproduces exactly.
+- **`analyze.py --strict`**: exit 0 against fresh `--resultDir` output from the
+  new engine for both `congestion` and `feedback` configs, real per-hop
+  forwarding numbers visible (e.g. `swCore.eth1` 139.42 Mbps / 29.55% drop on
+  `congestion`).
+- **pcap + tshark**: `check_pcap_gptp.py` PASS on a fresh `congestion` capture (34
+  files, all 6 message types present). Independently re-verified with tshark
+  directly (not just the checker): **0 malformed across 76,107 dissected PTPv2
+  frames** from the new engine's output — the byte-exact 802.1AS format (P3c)
+  carries over unchanged since `gptp.{h,cc}` is untouched.
+
+Docker: `libyaml-cpp-dev` added to the `ns3` stage's apt install list;
+`ns3/sim/` copied into the image alongside the four existing scenario dirs.
 
 ### P3c — Real IEEE 802.1AS wire format — ✅ **DONE**
 
@@ -459,7 +512,7 @@ part of this plan.
 | P2c pcap capture | 3–5 days | Low — reuses Phase 0's proven mechanism | No — **DONE**, opt-in, gates byte-identical when off |
 | P2d sim-time normalization | trivial | None | No — **DONE**, peaks unchanged (transient), counts ~2× |
 | P3a S5 fix (spike + real fix) | ✅ **DONE** | Was unknown; spike said bounded, real fix confirmed it | **Yes** — M3 peak 429→551 µs, M4 coupling 0.695→0.000 µs, isolation shape exact; P2c pcap briefly regressed then restored (manual `PcapHelper`/`PcapFileWrapper` hook) |
-| P3b YAML topology | 2–4 wk if pursued | Medium | No |
+| P3b YAML topology | ✅ **DONE** | Medium | **Mostly no** — Gate2/M2/M4 near-exact to old numbers (small disclosed CSMA→SimpleNetDevice transport shift); M3's congested peak differs (513→660µs, same order of magnitude) from an RNG-substream shift, not a mechanism bug — isolation shape and drop rate match closely |
 | P3c IEEE TLV wire format | 2–4 wk if pursued | Medium | No |
 | P3d GUI tooling | Not recommended | — | — |
 

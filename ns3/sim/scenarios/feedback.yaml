@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Reproduces ns3/feedback/feedback-topology.cc (M4) on the generic engine: M3's
+# finite-queue mechanism at cap 20, with periodic "frame" bursts from ALL 12 zone
+# clients, each scheduled on ITS OWN gPTP-steered local clock (S6 clock-driven
+# scheduling). If gPTP has synced the clients, their bursts land at the same
+# simulated instant -- collision emerges from sync quality, not hand-scripting.
+#
+# M4's gate is FAITHFULNESS, not "coupling must exist": report whatever the run
+# shows. INET found real congestion but gPTP offsets bit-identical to baseline
+# (Sync ~0.125s lands in the quiet gaps between 100ms burst cycles). The engine
+# runs both passes and reports the isolation shape; the expected finding is
+# negligible coupling (every node's steady-window peak within tol of baseline).
+
+sim:
+  time_s: 60.0
+  sync_interval_ms: 125.0
+  pdelay_interval_ms: 50.0
+
+nodes:
+  - {name: gm,         role: gm,     drift_ppm: 0.0}
+  - {name: swCore,     role: switch, drift_ppm: 50.0}
+  - {name: coreClient, role: client, drift_ppm: 150.0}
+  - {name: swA,        role: switch, drift_ppm: 80.0}
+  - {name: swB,        role: switch, drift_ppm: -60.0}
+  - {name: swC,        role: switch, drift_ppm: 100.0}
+  - {name: "clientsA[0]", role: client, drift_ppm: 126.61}
+  - {name: "clientsA[1]", role: client, drift_ppm: 42.74}
+  - {name: "clientsA[2]", role: client, drift_ppm: -1.77}
+  - {name: "clientsA[3]", role: client, drift_ppm: -47.36}
+  - {name: "clientsB[0]", role: client, drift_ppm: -52.37}
+  - {name: "clientsB[1]", role: client, drift_ppm: 122.64}
+  - {name: "clientsB[2]", role: client, drift_ppm: -159.65}
+  - {name: "clientsB[3]", role: client, drift_ppm: 33.92}
+  - {name: "clientsC[0]", role: client, drift_ppm: 175.62}
+  - {name: "clientsC[1]", role: client, drift_ppm: 50.44}
+  - {name: "clientsC[2]", role: client, drift_ppm: 128.78}
+  - {name: "clientsC[3]", role: client, drift_ppm: 23.71}
+
+# queue_cap 20 on every switch egress (feedback.ini packetCapacity = 20). Bursts
+# overflow both the zone-switch uplinks and swCore's bottleneck (two finite-queue
+# stages, the S5 real-forwarding consequence).
+links:
+  - {a: gm,     b: swCore,     master: a, queue_cap: 20, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swCore, b: coreClient, master: a, queue_cap: 20, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swCore, b: swA,        master: a, queue_cap: 20, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swCore, b: swB,        master: a, queue_cap: 20, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swCore, b: swC,        master: a, queue_cap: 20, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swA, b: "clientsA[0]", master: a, queue_cap: 20, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swA, b: "clientsA[1]", master: a, queue_cap: 20, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swA, b: "clientsA[2]", master: a, queue_cap: 20, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swA, b: "clientsA[3]", master: a, queue_cap: 20, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swB, b: "clientsB[0]", master: a, queue_cap: 20, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swB, b: "clientsB[1]", master: a, queue_cap: 20, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swB, b: "clientsB[2]", master: a, queue_cap: 20, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swB, b: "clientsB[3]", master: a, queue_cap: 20, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swC, b: "clientsC[0]", master: a, queue_cap: 20, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swC, b: "clientsC[1]", master: a, queue_cap: 20, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swC, b: "clientsC[2]", master: a, queue_cap: 20, data_rate: 100Mbps, delay_us: 1.0}
+  - {a: swC, b: "clientsC[3]", master: a, queue_cap: 20, data_rate: 100Mbps, delay_us: 1.0}
+
+traffic:
+  mode: aligned_bursts
+  burst_interval_ms: 100.0
+  fragments_per_burst: 15    # ~ (20000B - 54B) / 15, the microburst regime
+  fragment_bytes: 1330
+  start_s: 1.0
+  sources: ["clientsA[0]", "clientsA[1]", "clientsA[2]", "clientsA[3]",
+            "clientsB[0]", "clientsB[1]", "clientsB[2]", "clientsB[3]",
+            "clientsC[0]", "clientsC[1]", "clientsC[2]", "clientsC[3]"]
+  sink: coreClient
+
+report:
+  compare_baseline: true
+  isolation_tol_us: 0.5      # feedback.ini's "identical to baseline" tolerance
+  degrade_factor: 5.0
+  module_root: Nominal

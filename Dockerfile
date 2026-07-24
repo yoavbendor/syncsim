@@ -294,6 +294,7 @@ FROM ubuntu:24.04 AS ns3
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake ninja-build git ca-certificates python3 \
+        libyaml-cpp-dev \
     && rm -rf /var/lib/apt/lists/*
 
 ENV NS3_ROOT=/opt/ns-3-dev
@@ -309,6 +310,11 @@ COPY ns3/gptp "$NS3_ROOT/scratch/syncsim-gptp"
 COPY ns3/nominal "$NS3_ROOT/scratch/syncsim-nominal"
 COPY ns3/congestion "$NS3_ROOT/scratch/syncsim-congestion"
 COPY ns3/feedback "$NS3_ROOT/scratch/syncsim-feedback"
+# P3b: the generic YAML-driven engine. Unlike the scenario dirs above (each
+# auto-globbed into a single executable), this one carries its own
+# CMakeLists.txt so it can link the external yaml-cpp library (libyaml-cpp-dev,
+# installed above) without patching ns-3 core -- see ns3/sim/CMakeLists.txt.
+COPY ns3/sim "$NS3_ROOT/scratch/syncsim-sim"
 
 # Minimal module set (core data-plane + clock/gPTP spike needs only these,
 # nothing wireless/routing-protocol-heavy) to keep the build fast --
