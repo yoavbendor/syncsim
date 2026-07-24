@@ -52,7 +52,7 @@ treatment:
 | — | No pcap capture/replay past Phase 0's smoke test — ✅ **DONE (P2c)**: `--pcapPrefix` on all three scenarios + `check_pcap_gptp.py` verifier | Missing capability, moderate | ~~Not built~~ built P2c (own-format, off by default) | Debuggability gap closed; IEEE-dissectable capture still Tier 3 | 2 |
 | — | No YAML-topology-DSL equivalent (Phase B) | Missing capability, large | Not built | Every ns-3 topology is hand-coded C++, not data-driven | 3 |
 | — | No GUI/interactive tooling (Qtenv/IDE equivalent) | Missing capability, large | Not built; ns-3's own tools (NetAnim/PyViz) are a different paradigm, not a clean port target | Developer-experience gap, not a fidelity gap | 3 |
-| — | Real IEEE TLV wire format for gPTP messages | Missing capability, large | Pragmatic 19-byte custom header used throughout | Needed for genuinely Wireshark-dissectable captures — pcap alone (above) doesn't get you this | 3 |
+| — | Real IEEE 802.1AS wire format for gPTP messages — ✅ **DONE (P3c)**: byte-exact 802.1AS on EtherType 0x88F7 + reserved multicast, tshark-dissectable (zero malformed) | Missing capability, large | ~~Pragmatic 19-byte custom header~~ replaced by byte-exact 802.1AS (P3c) | Genuinely Wireshark-dissectable captures now achieved; disclosed frame-size peer-delay/peak ripple, all gates PASS | **3 — DONE** |
 | — | Single topology fully proven (Nominal/Minimal shape only) | Missing capability | No generator/DSL to vary topology cheaply | Same root cause as the YAML-DSL gap | 3 |
 | — | Shorter sim-time (20–30s ns-3 runs vs. OMNeT++'s 60s) — ✅ **DONE (P2d)**: default now 60s | Minor | ~~Convenience~~ normalized P2d | Low severity; peaks unchanged, time-scaled counts ~2× | 2 (folded into P2c commit) |
 | — | M6 (real `ptp4l` cross-check) | Shared gap | Never built on *either* track | Not ns-3 falling behind — a future capability for the whole project | 4 (out of scope here) |
@@ -374,13 +374,56 @@ topologies without hand-coding each one), real effort (a general-purpose
 topology interpreter, plus wiring `GptpEntity` role assignment generically).
 Depends on nothing else in this plan; can be spiked independently.
 
-### P3c — Real IEEE TLV wire format
+### P3c — Real IEEE 802.1AS wire format — ✅ **DONE**
 
-Needed only if full Wireshark-dissectable capture (not just this project's
-own round-trip format from P2c) is an actual goal. Substantial,
-byte-exact-to-spec protocol implementation work. Pairs naturally with P2b
-(2-step framing) if pursued — a 1-step, custom-header capture would not look
-like a real gPTP capture regardless of TLV work done in isolation.
+**Status (done):** `gptp.{h,cc}`'s `GptpHeader` now emits the **byte-exact IEEE
+802.1AS-2011 / IEEE 1588-2008 wire format** (34-byte common PTP header + per-type
+bodies + the Follow_Up Information TLV and Announce Path Trace TLV), on the real
+PTP EtherType **0x88F7** (was 0x88b6), sent to the reserved gPTP multicast
+**01-80-C2-00-00-0E** (was peer unicast; delivery over the 2-device
+SimpleNetDevice/CsmaChannel links empirically confirmed first). Strict-802.1AS
+scope: Announce, Sync, Follow_Up, Pdelay_Req, Pdelay_Resp,
+Pdelay_Resp_Follow_Up — no E2E Delay_Req/Resp, no PTPv1, no Signaling/Management.
+ClockIdentity is the standard EUI-64 from each port's MAC. A GM-only, additive
+`SendAnnounce` was added (static GM-quality/BMCA fields, **not** consumed by any
+receiver's servo/offset math). `gptp.{h,cc}` re-vendored **byte-identical** across
+`gptp/`, `nominal/`, `congestion/`, `feedback/` (md5-verified);
+`check_pcap_gptp.py` updated (messageType = low nibble of `frame[14]`, real 1588
+codes, EtherType 0x88F7). Full byte tables + tshark transcript in
+**`ns3/gptp/WIRE_FORMAT.md`**.
+
+**Authoritative correctness check — tshark's unmodified PTPv2 dissector:** every
+frame of every type dissects cleanly, **zero malformed across all 68 capture
+files** (34 nominal CSMA real-Ethernet + 34 congestion SimpleNetDevice
+synthetic-Ethernet). tshark parses every field, echoes `requestingPortIdentity`
+correctly, and links the chains (`Follow Up to Sync in Frame N`, `Peer Delay
+Follow Up to Response in Frame N`), even computing `calculatedSyncTimestamp`. The
+old `19-byte custom header` could not do any of this.
+
+**This is a pure wire-ENCODING rewrite** — `GptpEntity`'s algorithm is byte-for-
+byte unchanged and still operates on `ns3::Time` values from the header.
+Timestamps are lossless (ns-3's default ns resolution ⇒ every Time is integer-ns
+⇒ exactly representable as PTP seconds+ns). **One honest, disclosed consequence:**
+the real 802.1AS frames are larger than the old 19-byte header (Pdelay 54 B, Sync
+44 B, Follow_Up 76 B), and per S1 the measured peer delay folds in one frame
+serialization time, so the **displayed peer delay grows** and its larger constant
+DC bias ripples through the **pre-lock transient peaks**. This is frame-size
+physics (the S1 property on realistic sizes), **proven not a layout bug** by
+tshark's clean dissection — the same "disclose, don't hide" discipline as P2a/
+P2b/P3a. All gated properties hold; all four gates PASS deterministically (twice
+each, byte-identical stdout; `--pcapPrefix` unset ⇒ byte-identical to before):
+
+| Gate | Before → After | Verdict |
+|---|---|---|
+| **Gate 2** (gptp-spike) | peer delay `6.62 → 7.26 µs`; peaks `sw 12.850→12.658`, `client1 32.201→31.817`, `client2 57.178→57.561`; finals `0.000`; servos `159` | **PASS** (order + proportionality + finals hold) |
+| **M2** (nominal) | peaks shift ~`0.2 µs/hop` (hop-proportional: swCore `7.975→7.783`, coreClient `24.076→23.692`); finals `0.000`; servos `479` | **PASS** |
+| **M3** (congestion) | isolation shape **EXACT** (16/17 at 1.0×); coreClient congested peak `550.854→513.430 µs` (22.6×→21.5×); drop `29.66%` unchanged; servos base `479`, congested `125→114` | **PASS** |
+| **M4** (feedback) | coupling non-finding **preserved** (all deltas `0.000`); peaks `±0.01 µs`; spread `0.579→0.578 µs` | **PASS** |
+
+The M3 congested-peak / servo-count move is the larger-frame effect on the
+loss-sensitive path (bigger Sync/Follow_Up pairs behind the bottleneck queue) —
+the same class of behavior P2b disclosed for 2-step framing under loss; the
+isolation shape and gate are unchanged.
 
 ### P3d — GUI/interactive tooling
 

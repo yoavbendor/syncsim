@@ -82,6 +82,42 @@
 //       construction (same 4-node/3-link shape) and attach our own per-device
 //       receive callbacks instead of a bridge. See gptp-spike.cc.
 // ---------------------------------------------------------------------------
+// WIRE FORMAT (P3c, Tier 3 -- CLOSED). Formerly a pragmatic 19-byte custom
+// header (type:1 + seq:2 + ta:8 + tb:8). Now the byte-exact IEEE 802.1AS-2011 /
+// IEEE 1588-2008 wire format, so real captures are dissectable by unmodified
+// tools (tshark's PTPv2 dissector, Wireshark) -- not just this project's own
+// check_pcap_gptp.py. Scope is STRICT 802.1AS: peer-delay (P2P) only, no E2E
+// Delay_Req/Resp, no PTPv1, no Signaling/Management. Supported message types:
+// Announce, Sync, Follow_Up (with the 802.1 Follow_Up Information TLV),
+// Pdelay_Req, Pdelay_Resp, Pdelay_Resp_Follow_Up. The 34-byte common PTP header
+// (transportSpecific=0x1 gPTP marker, versionPTP=2, messageLength,
+// correctionField as ns*2^16, sourcePortIdentity = EUI-64 ClockIdentity +
+// portNumber, sequenceId, controlField, logMessageInterval) precedes each
+// message's body; see ns3/gptp/WIRE_FORMAT.md for the exact, tshark-verified
+// per-type byte tables. EtherType is now the IEEE-assigned 0x88F7 (was 0x88b6),
+// and every message is sent to the reserved non-forwarded multicast destination
+// 01-80-C2-00-00-0E (was the peer's unicast address) -- both faithful to real
+// gPTP and both empirically confirmed to deliver over this project's 2-device
+// SimpleNetDevice / CsmaChannel point-to-point links.
+//
+// This is a pure wire-ENCODING rewrite: GptpEntity's algorithm (ApplyServo,
+// peer-delay math, neighborRateRatio, residence relay) is byte-for-byte
+// unchanged and still operates on ns3::Time values extracted from the header.
+// Because ns-3's default time resolution is nanoseconds, every Time in this
+// model is already an integer number of nanoseconds, so encoding a timestamp as
+// the PTP secondsField(48)+nanosecondsField(32) pair is LOSSLESS -- no offset,
+// peak, servo-count, or isolation number moves. The one honest, expected
+// consequence (disclosed, not hidden -- same discipline as every prior phase):
+// the real 802.1AS frames are larger than the old 19-byte header (Pdelay 54 B,
+// Sync 44 B, Follow_Up 76 B vs 19 B), and per S1 the measured peer delay folds
+// in one frame serialization time, so the DISPLAYED peer-delay values grow to
+// reflect the real, larger frames. This is the S1 serialization property acting
+// faithfully on realistic frame sizes; the gated properties (convergence to ~0,
+// drift-proportional peaks, isolation shape, servo counts) are unaffected
+// because the servo nulls the constant peer-delay DC offset every cycle. See
+// WIRE_FORMAT.md for the before/after peer-delay figures and the tshark
+// dissection transcript.
+// ---------------------------------------------------------------------------
 // SERVO (P1a, Tier 1 -- hardened; supersedes the Phase-2 first-spike servo).
 //
 // The Phase-2 servo was a DEADBEAT phase step (null the entire measured offset
@@ -126,38 +162,64 @@
 
 #include "clock.h"
 
+#include "ns3/address.h"
 #include "ns3/callback.h"
 #include "ns3/header.h"
+#include "ns3/mac48-address.h"
 #include "ns3/net-device.h"
 #include "ns3/nstime.h"
 #include "ns3/traced-callback.h"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace syncsim {
 
-// gPTP message discriminator carried in GptpHeader::m_type.
+// gPTP message discriminator. Values are the REAL IEEE 1588-2008 messageType
+// 4-bit codes (P3c) -- the low nibble of the first wire byte (the high nibble is
+// transportSpecific = 0x1, the 802.1AS gPTP marker). They no longer index the
+// old custom header slots; they ARE the on-wire messageType field.
 enum class GptpMsgType : uint8_t
 {
-    PdelayReq = 0,          // requester -> responder: "when did this reach you / leave you?"
-    PdelayResp = 1,         // responder -> requester: carries t2 (rx) only [2-step, S2 closed]
-    Sync = 2,               // master -> slave: bare marker (its arrival = syncRxLocal) [2-step]
-    PdelayRespFollowUp = 3, // responder -> requester: carries t3 (responder tx of the Resp)
-    FollowUp = 4            // master -> slave: carries preciseOriginTimestamp + correctionField
+    Sync = 0x0,               // master -> slave: bare marker (its arrival = syncRxLocal) [2-step]
+    PdelayReq = 0x2,          // requester -> responder: peer-delay request
+    PdelayResp = 0x3,         // responder -> requester: carries t2 (requestReceiptTimestamp)
+    FollowUp = 0x8,           // master -> slave: preciseOriginTimestamp + correctionField + TLV
+    PdelayRespFollowUp = 0xA, // responder -> requester: carries t3 (responseOriginTimestamp)
+    Announce = 0xB            // GM -> downstream: periodic BMCA/GM-quality broadcast (additive)
 };
 
-// Minimal on-the-wire gPTP message. A pragmatic custom ns3::Header (per the
-// Phase 2 task: no IEEE TLV wire-format fidelity needed for Gate 2). Two int64
-// timestamp/field slots are reused per message type (2-step framing, S2 closed):
-//   PdelayReq          : ta = requester tx time (t1), tb unused
-//   PdelayResp         : ta = responder rx time (t2), tb unused
-//   PdelayRespFollowUp : ta = responder tx time (t3), tb unused
-//   Sync               : bare marker (ta/tb unused; only its arrival time matters)
-//   FollowUp           : ta = preciseOriginTimestamp,  tb = correctionField
-// Timestamps are serialized as int64 femtoseconds (lossless for ns-resolution
-// Time; ample headroom for a 60 s run).
+// The 6-byte EUI-64 ClockIdentity type (8 bytes) derived from a device MAC.
+using ClockIdentity = std::array<uint8_t, 8>;
+
+// Standard 802.1AS default ClockIdentity from a 6-byte MAC via EUI-64: insert
+// 0xFF 0xFE in the middle (AA:BB:CC:DD:EE:FF -> AA:BB:CC:FF:FE:DD:EE:FF).
+ClockIdentity MacToClockIdentity(const ns3::Address& mac);
+
+// The reserved, non-forwarded gPTP multicast destination MAC (01-80-C2-00-00-0E)
+// that real 802.1AS uses for every message type. Delivery to it over this
+// project's 2-device point-to-point links was empirically confirmed on both
+// SimpleNetDevice and CsmaNetDevice transports (P3c spike).
+ns3::Address GptpMulticastAddress();
+
+// On-the-wire gPTP message: byte-exact IEEE 802.1AS-2011 / IEEE 1588-2008
+// (P3c). A 34-byte common PTP header + a per-messageType body (+ TLV for
+// Follow_Up / Announce). See ns3/gptp/WIRE_FORMAT.md for the tshark-verified
+// byte tables. The in-memory representation keeps only the fields this project's
+// mechanism reads or writes; all fixed/static fields (versionPTP, domain,
+// control, flags, the Follow_Up/Path-Trace TLVs, Announce's GM-quality
+// constants) are synthesized in Serialize() and skipped in Deserialize().
+//
+//   ta  = the message's primary body timestamp:
+//           Follow_Up            -> preciseOriginTimestamp
+//           Pdelay_Resp          -> requestReceiptTimestamp (t2)
+//           Pdelay_Resp_Follow_Up-> responseOriginTimestamp (t3)
+//           Sync / Pdelay_Req / Announce -> unused (wire value all-zero)
+//   tb  = correctionField (common header, Follow_Up only; ns * 2^16 on the wire)
+// Both are lossless: ns-3's default ns time resolution means every Time is an
+// integer number of nanoseconds, exactly representable as PTP seconds+ns.
 class GptpHeader : public ns3::Header
 {
   public:
@@ -167,10 +229,35 @@ class GptpHeader : public ns3::Header
     GptpMsgType GetType() const { return m_type; }
     void SetSeq(uint16_t s) { m_seq = s; }
     uint16_t GetSeq() const { return m_seq; }
-    void SetTa(ns3::Time t) { m_ta = t.GetFemtoSeconds(); }
-    ns3::Time GetTa() const { return ns3::FemtoSeconds(m_ta); }
-    void SetTb(ns3::Time t) { m_tb = t.GetFemtoSeconds(); }
-    ns3::Time GetTb() const { return ns3::FemtoSeconds(m_tb); }
+    // Primary body timestamp (see class comment). Wire: secondsField(48)+ns(32).
+    void SetTa(ns3::Time t) { m_taNs = t.GetNanoSeconds(); }
+    ns3::Time GetTa() const { return ns3::NanoSeconds(m_taNs); }
+    // correctionField (Follow_Up). Wire: Int64 BE = whole-ns * 2^16 (sub-ns 0).
+    void SetTb(ns3::Time t) { m_corr = t.GetNanoSeconds() * 65536; }
+    ns3::Time GetTb() const { return ns3::NanoSeconds(m_corr / 65536); }
+
+    // sourcePortIdentity (set for every outgoing message from the sending port).
+    void SetSourceIdentity(const ClockIdentity& id, uint16_t portNumber)
+    {
+        m_srcClockId = id;
+        m_srcPort = portNumber;
+    }
+    const ClockIdentity& GetSourceClockId() const { return m_srcClockId; }
+    uint16_t GetSourcePortNumber() const { return m_srcPort; }
+
+    // requestingPortIdentity (Pdelay_Resp / Pdelay_Resp_Follow_Up: echoed back
+    // from the Pdelay_Req this responds to -- a real, meaningful field).
+    void SetRequestingIdentity(const ClockIdentity& id, uint16_t portNumber)
+    {
+        m_reqClockId = id;
+        m_reqPort = portNumber;
+    }
+    const ClockIdentity& GetRequestingClockId() const { return m_reqClockId; }
+    uint16_t GetRequestingPortNumber() const { return m_reqPort; }
+
+    // logMessageInterval (Int8, informational). 0x7F = "unknown" default.
+    void SetLogInterval(int8_t v) { m_logInterval = v; }
+    int8_t GetLogInterval() const { return m_logInterval; }
 
     static ns3::TypeId GetTypeId();
     ns3::TypeId GetInstanceTypeId() const override;
@@ -182,8 +269,13 @@ class GptpHeader : public ns3::Header
   private:
     GptpMsgType m_type{GptpMsgType::Sync};
     uint16_t m_seq{0};
-    int64_t m_ta{0};
-    int64_t m_tb{0};
+    int64_t m_taNs{0};                     // primary body timestamp, whole ns
+    int64_t m_corr{0};                     // correctionField, ns * 2^16
+    int8_t m_logInterval{0x7F};            // logMessageInterval (informational)
+    ClockIdentity m_srcClockId{};          // sourcePortIdentity.clockIdentity
+    uint16_t m_srcPort{1};                 // sourcePortIdentity.portNumber (1-based)
+    ClockIdentity m_reqClockId{};          // requestingPortIdentity.clockIdentity
+    uint16_t m_reqPort{0};                 // requestingPortIdentity.portNumber
 };
 
 // The gPTP protocol entity for one node. Owns a set of ports (one per link),
@@ -225,6 +317,12 @@ class GptpEntity
     void StartPdelay(ns3::Time pdelayInterval);
     // GM only: emit a Sync on every master port. Reschedules every syncInterval.
     void SendSync(ns3::Time syncInterval);
+    // GM only (P3c, additive): emit an Announce on every master port. Purely for
+    // wire-realism/dissectability -- carries static GM-quality/BMCA fields (this
+    // project has no dynamic BMCA; the GM is fixed by construction) and is NOT
+    // consumed by any receiver's servo/offset math. Reschedules every interval,
+    // on the same cadence pattern the scenario uses for SendSync.
+    void SendAnnounce(ns3::Time announceInterval);
 
     // --- observability ---------------------------------------------------
     // Fired every time this node's servo processes a Sync-derived offset:
@@ -246,8 +344,9 @@ class GptpEntity
     struct Port
     {
         ns3::Ptr<ns3::NetDevice> dev;
-        ns3::Address peerMac;
+        ns3::Address peerMac;      // gPTP multicast destination (P3c) frames are sent to
         bool isMaster;
+        ClockIdentity clockId{};   // this port's EUI-64 ClockIdentity (from dev MAC)
         ns3::Time linkDelay{0};   // measured mean propagation delay (S1: incl. one serialization)
         uint16_t pdelaySeq{0};    // our outstanding Pdelay_Req seq
         ns3::Time pdelayT1{0};    // local tx time of our outstanding Pdelay_Req
@@ -266,12 +365,16 @@ class GptpEntity
         ns3::Time rrPrevT4{0};
     };
 
-    void SendFrame(uint32_t portIndex, const GptpHeader& hdr);
+    // Serializes hdr onto a fresh packet, stamping the sending port's
+    // sourcePortIdentity (EUI-64 ClockIdentity + 1-based portNumber) and the
+    // per-type logMessageInterval, then sends to the gPTP multicast destination.
+    void SendFrame(uint32_t portIndex, GptpHeader& hdr);
     void HandlePdelayReq(uint32_t portIndex, const GptpHeader& in);
     void HandlePdelayResp(uint32_t portIndex, const GptpHeader& in);
     void HandlePdelayRespFollowUp(uint32_t portIndex, const GptpHeader& in);
     void HandleSync(uint32_t portIndex, const GptpHeader& in);
     void HandleFollowUp(uint32_t portIndex, const GptpHeader& in);
+    void HandleAnnounce(uint32_t portIndex, const GptpHeader& in);
     // Bridge relay: regenerate Sync on all master ports after the residence time.
     void RelayDownstream(ns3::Time originTs, ns3::Time upstreamCorrection,
                          ns3::Time slaveRecvLocal, ns3::Time slaveLinkDelay,
@@ -289,6 +392,7 @@ class GptpEntity
     std::vector<Port> m_ports;
     int m_slavePort{-1};           // index of the (single) slave port, -1 if none
     uint16_t m_syncSeq{0};         // GM/bridge: outgoing Sync seq
+    uint16_t m_announceSeq{0};      // GM: outgoing Announce seq (independent per 1588)
 
     // 2-step Sync (S2 closed): slave pending state between receiving the bare
     // Sync (whose arrival time IS syncRxLocal) and its Follow_Up (which carries
@@ -296,6 +400,16 @@ class GptpEntity
     bool m_syncPending{false};
     uint16_t m_syncPendingSeq{0};
     ns3::Time m_syncRxLocal{0};
+
+    // Per-type logMessageInterval (P3c, informational wire field). Captured at
+    // the first SendSync / StartPdelay / SendAnnounce call from the interval the
+    // scenario configured (rounded log2 seconds); 0x7F ("unknown") until then.
+    // Not read by any handler -- it never affects the servo or offset math.
+    int8_t m_logSyncInterval{0x7F};
+    int8_t m_logPdelayInterval{0x7F};
+    int8_t m_logAnnounceInterval{0x7F};
+    // Count of Announce frames received (observability only; never gated).
+    uint32_t m_announceRxCount{0};
 
     // Servo state.
     bool m_haveLastSync{false};
@@ -314,9 +428,10 @@ class GptpEntity
     // real, non-zero processing/queueing time so residence is a measurable,
     // non-trivial duration on the local clock).
     static constexpr double kResidenceDelayUs = 10.0;
-    // Ethertype for our gPTP frames (IEEE 802 local-experimental, same family as
-    // Phase 0's smoke test). Not 0x88F7 -- we are not claiming wire fidelity.
-    static constexpr uint16_t kGptpProtocol = 0x88b6;
+    // EtherType for gPTP frames: the real IEEE-assigned PTP EtherType (P3c;
+    // was the custom 0x88b6). This is what unmodified tools key their PTPv2
+    // dissector on, so a capture is now genuinely dissectable.
+    static constexpr uint16_t kGptpProtocol = 0x88F7;
     // Servo gains (P1a hardened PI loop; see the SERVO block in the file header).
     // kPhaseGain (<1): proportional phase step -- the fraction of the measured
     //   offset stepped each Sync. Damped (not the old deadbeat 1.0) so one late

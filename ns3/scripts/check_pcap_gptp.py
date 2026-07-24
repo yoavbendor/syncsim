@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """
-P2c verification: confirm the pcap files a nominal/congestion/feedback run wrote
-(with --pcapPrefix) contain REAL, PARSEABLE gPTP frames in this project's own
-GptpHeader wire format -- not just that a file exists.
+P2c/P3c verification: confirm the pcap files a gptp-spike/nominal/congestion/
+feedback run wrote (with --pcapPrefix) contain REAL, PARSEABLE gPTP frames in the
+byte-exact IEEE 802.1AS wire format (P3c) -- not just that a file exists.
 
 Mirrors the spirit of scripts/check_pcap_replay.py (prove the capture is genuine,
-content-verifiably), adapted to this project's custom 19-byte header. It is a
-standalone, dependency-free pcap reader (no scapy) that:
+content-verifiably). Since P3c the on-wire format is byte-exact 802.1AS, so the
+authoritative correctness check is now `tshark -r <f> -Y ptp` (Wireshark's own
+unmodified PTPv2 dissector) -- see ns3/gptp/WIRE_FORMAT.md for the verified
+transcript. This script remains a standalone, dependency-free cross-check (no
+scapy / no tshark needed) that:
 
   1. parses each *.pcap's global + per-record headers (both endiannesses),
-  2. for every Ethernet frame with our gPTP ethertype 0x88b6, reads the first
-     payload byte = GptpMsgType and tallies it,
-  3. asserts genuine gPTP traffic was captured, and -- since P2b -- that the
-     2-step message types (Pdelay_Resp_Follow_Up, Follow_Up) are present, which a
-     1-step capture could not contain. That is the "real, parseable, expected
-     message types" check the C1 pcap milestone did for the OMNeT++ path.
+  2. for every Ethernet frame with the real PTP ethertype 0x88F7, reads the
+     messageType = LOW NIBBLE of the first PTP payload byte (frame[14] & 0x0F;
+     the high nibble is transportSpecific = 0x1) and tallies it,
+  3. asserts genuine gPTP traffic was captured with the 2-step message types
+     (Pdelay_Resp_Follow_Up, Follow_Up) present, which a 1-step capture could not
+     contain. That is the "real, parseable, expected message types" check the C1
+     pcap milestone did for the OMNeT++ path.
 
-NOT a Wireshark-dissectable 802.1AS check: this header is the project's pragmatic
-format, not the IEEE TLV wire format (that is Tier 3). Usage:
+Usage:
     check_pcap_gptp.py <dir-or-pcap> [<more> ...]
 """
 import glob
@@ -25,16 +28,17 @@ import os
 import struct
 import sys
 
-GPTP_ETHERTYPE = 0x88B6
-# GptpMsgType (see ns3/gptp/gptp.h) -- kept in sync by name for the report.
+GPTP_ETHERTYPE = 0x88F7  # real IEEE-assigned PTP EtherType (P3c)
+# GptpMsgType = real IEEE 1588-2008 messageType nibbles (see ns3/gptp/gptp.h).
 MSG_NAMES = {
-    0: "PdelayReq",
-    1: "PdelayResp",
-    2: "Sync",
-    3: "PdelayRespFollowUp",  # 2-step, added by P2b
-    4: "FollowUp",            # 2-step, added by P2b
+    0x0: "Sync",
+    0x2: "PdelayReq",
+    0x3: "PdelayResp",
+    0x8: "FollowUp",             # 2-step
+    0xA: "PdelayRespFollowUp",   # 2-step
+    0xB: "Announce",             # P3c, additive
 }
-TWO_STEP_TYPES = {3, 4}  # message types that only exist in the 2-step framing
+TWO_STEP_TYPES = {0x8, 0xA}  # message types that only exist in the 2-step framing
 
 
 def iter_pcap_frames(path):
@@ -92,7 +96,7 @@ def scan(paths):
             if ethertype != GPTP_ETHERTYPE:
                 continue
             gptp_frames += 1
-            mtype = frame[14]
+            mtype = frame[14] & 0x0F  # messageType = low nibble (high = transportSpecific)
             totals[mtype] = totals.get(mtype, 0) + 1
 
     print(f"[check_pcap_gptp] scanned {len(files)} file(s), "

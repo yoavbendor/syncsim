@@ -235,14 +235,21 @@ result is reported as data, per `feedback.ini`'s own standard.
   that real, aligned, queue-overflowing microburst load, gPTP sync is **not**
   measurably degraded at any node — a faithful reproduction of INET's M4 non-finding
   (bit-identical offsets), now with zero coupling everywhere.
+- **Also does (new — P3c):** the captured wire format is now **byte-exact IEEE
+  802.1AS** (EtherType 0x88F7, reserved gPTP multicast) — genuinely
+  Wireshark/tshark-dissectable. M4's coupling **non-finding is preserved exactly**
+  under P3c (all 17 nodes' steady-window deltas still `0.000`; peaks moved
+  `±0.01 µs`, burst spread `0.579 → 0.578 µs`) — the frame-size effect is
+  negligible here because Sync lands in the quiet gaps. See
+  `ns3/gptp/WIRE_FORMAT.md`.
 - **Does not (deferred / simplified):** perfect `scheduleForAbsoluteTime`
-  re-anchoring (S6), and **IEEE-TLV** wire format (Tier 3) — pcap capture itself
-  is restored (see `congestion/README.md`'s pcap section — same manual
-  `PcapHelper::CreateFile`/`PcapFileWrapper::Write` hook, ported unchanged;
-  verified here too: `check_pcap_gptp.py` PASS on a fresh capture, all five
-  message types present). Carries S1 forward unchanged and S4 is deliberate;
+  re-anchoring (S6). pcap capture is restored (see `congestion/README.md`'s pcap
+  section — same manual `PcapHelper::CreateFile`/`PcapFileWrapper::Write` hook);
+  verified here too: **tshark's PTPv2 dissector parses every frame (zero
+  malformed)** and `check_pcap_gptp.py` PASSes on a fresh capture with all six
+  message types present. Carries S1 forward unchanged and S4 is deliberate;
   **S2 closed by P2b**, **S3 closed by P2a**, **S5 (hop-by-hop forwarding)
-  closed by P3a**.
+  closed by P3a**, **real 802.1AS wire format closed by P3c**.
 
 ### Honest licensing note
 

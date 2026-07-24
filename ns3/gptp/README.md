@@ -118,11 +118,16 @@ like an unresolvable slave/master ordering problem dissolves.
   bridge is installed — we keep the exact CsmaHelper link construction and attach
   our own per-device receive callbacks.
 
-Message wire format is a pragmatic 19-byte custom `ns3::Header` (type + seq + two
-int64 femtosecond fields); no IEEE TLV fidelity or pcap for this scenario (Gate 2
-gates on convergence, not wire format — unlike Phase 0/real syncsim, which do
-care about pcap). **Two frames per Pdelay exchange and per Sync cycle as of P2b
-(2-step)** — the header is unchanged, only the message count grew.
+Message wire format is the **byte-exact IEEE 802.1AS-2011 format as of P3c**
+(Tier 3) — a 34-byte common PTP header + per-type bodies + the Follow_Up
+Information TLV and Announce Path Trace TLV, on the real PTP EtherType 0x88F7 to
+the reserved gPTP multicast `01-80-C2-00-00-0E`. It replaced the pragmatic
+19-byte custom header used through P2c. Captures are now **genuinely dissectable
+by tshark/Wireshark's own PTPv2 dissector** (verified zero-malformed);
+`gptp-spike.cc` gained an opt-in `--pcapPrefix`. **Two frames per Pdelay exchange
+and per Sync cycle as of P2b (2-step)**, plus a GM-only additive Announce as of
+P3c. Full byte tables, the tshark transcript, and the one disclosed frame-size
+number change are in **`WIRE_FORMAT.md`**.
 
 **2-step framing note (P2b — S2 closed).** Splitting `Pdelay_Resp` into
 `Pdelay_Resp` (t2) + `Pdelay_Resp_Follow_Up` (t3), and `Sync` into a bare marker

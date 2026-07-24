@@ -105,7 +105,7 @@ namespace
 
 constexpr int GM = 0, SWCORE = 1, CORECLIENT = 2, SWA = 3, SWB = 4, SWC = 5;
 constexpr int NNODES = 18;
-constexpr uint16_t kGptpProtocol = 0x88b6; // must match gptp.cc's kGptpProtocol
+constexpr uint16_t kGptpProtocol = 0x88F7; // real IEEE PTP EtherType (P3c); matches gptp.cc
 constexpr uint16_t kDataProtocol = 0x88b5; // background data plane (distinct)
 constexpr uint32_t kDataPayload = 946;     // 1000B - 54B, per congestion.ini
 
@@ -265,7 +265,12 @@ CombinedRx(int nodeId,
 {
     if (pcapFile)
     {
-        PcapCapture(pcapFile, device->GetAddress(), pkt, protocol, from);
+        // For gPTP the real destination is the reserved multicast (P3c); data
+        // frames are unicast to this device. SimpleNetDevice carries no on-wire
+        // Ethernet header, so PcapCapture synthesizes one for the capture.
+        Address dst = (protocol == kGptpProtocol) ? syncsim::GptpMulticastAddress()
+                                                  : device->GetAddress();
+        PcapCapture(pcapFile, dst, pkt, protocol, from);
     }
     if (protocol == kGptpProtocol)
     {
@@ -528,8 +533,10 @@ runScenario(bool background,
     // egresses (finite queue). Returns the devices + port indices for data wiring.
     auto link = [&](int a, int b, bool aIsMaster, bool aIsSwitch, bool bIsSwitch) -> LinkResult {
         NetDeviceContainer dv = simple.Install(NodeContainer(nodes.Get(a), nodes.Get(b)));
-        uint32_t pa = ent[a]->AddPort(dv.Get(0), dv.Get(1)->GetAddress(), aIsMaster);
-        uint32_t pb = ent[b]->AddPort(dv.Get(1), dv.Get(0)->GetAddress(), !aIsMaster);
+        // P3c: gPTP frames go to the reserved 802.1AS multicast, not peer unicast.
+        Address gptpMc = syncsim::GptpMulticastAddress();
+        uint32_t pa = ent[a]->AddPort(dv.Get(0), gptpMc, aIsMaster);
+        uint32_t pb = ent[b]->AddPort(dv.Get(1), gptpMc, !aIsMaster);
         // P2c pcap: one capture file per device, RX-hooked in CombinedRx (see
         // PcapCapture's comment). Only the congested pass is captured (the
         // interesting one), matching the original CsmaHelper::EnablePcapAll scope.
@@ -632,6 +639,11 @@ runScenario(bool background,
                             pdelayInterval);
     }
     Simulator::Schedule(syncInterval, &syncsim::GptpEntity::SendSync, ent[GM].get(), syncInterval);
+    // GM also emits Announce on the same cadence (P3c, additive). Scheduled after
+    // SendSync so it enqueues behind the Sync/Follow_Up burst (no measured-frame
+    // delay); not forwarded, not consumed by any servo.
+    Simulator::Schedule(syncInterval, &syncsim::GptpEntity::SendAnnounce, ent[GM].get(),
+                        syncInterval);
 
     // ---- Background data sources (S5: originated at clientsX[0], forwarded) --
     // Three ~50 Mbps flows, one per zone, each ORIGINATING at that zone's first

@@ -122,11 +122,16 @@ main(int argc, char* argv[])
     double syncIntervalMs = 125.0;  // INET default gPTP syncInterval
     double pdelayIntervalMs = 50.0; // peer-delay refresh
     double finalTolUs = 2.0;        // "final offset near 0" tolerance
+    std::string pcapPrefix = "";    // P3c: pcap capture prefix (empty = off, default)
     CommandLine cmd(__FILE__);
     cmd.AddValue("simTime", "Simulation duration (s)", simTime);
     cmd.AddValue("syncInterval", "gPTP Sync interval (ms)", syncIntervalMs);
     cmd.AddValue("pdelayInterval", "Peer-delay interval (ms)", pdelayIntervalMs);
     cmd.AddValue("finalTol", "Final-offset tolerance (us)", finalTolUs);
+    cmd.AddValue("pcapPrefix",
+                 "If set, capture byte-exact 802.1AS pcaps on every CSMA device "
+                 "(<prefix>-<node>-<dev>.pcap). Empty = off (default).",
+                 pcapPrefix);
     cmd.Parse(argc, argv);
 
     // Deterministic; this spike touches no RNG (see header). Pinned for parity.
@@ -162,15 +167,19 @@ main(int argc, char* argv[])
     syncsim::GptpEntity c1E("client1", &c1Clock, false);
     syncsim::GptpEntity c2E("client2", &c2Clock, false);
 
+    // Every gPTP frame is sent to the reserved 802.1AS multicast (P3c), not the
+    // peer's unicast address -- faithful to real gPTP and delivered fine over
+    // these 2-device point-to-point CSMA links (empirically confirmed).
+    Address gptpMc = syncsim::GptpMulticastAddress();
     // GM: one master port toward sw.
-    uint32_t gmP0 = gmE.AddPort(gmSwLink.Get(0), gmSwLink.Get(1)->GetAddress(), /*master=*/true);
+    uint32_t gmP0 = gmE.AddPort(gmSwLink.Get(0), gptpMc, /*master=*/true);
     // sw: slave toward gm (port0), masters toward client1 (port1), client2 (port2).
-    uint32_t swP0 = swE.AddPort(gmSwLink.Get(1), gmSwLink.Get(0)->GetAddress(), false);
-    uint32_t swP1 = swE.AddPort(swC1Link.Get(0), swC1Link.Get(1)->GetAddress(), true);
-    uint32_t swP2 = swE.AddPort(swC2Link.Get(0), swC2Link.Get(1)->GetAddress(), true);
+    uint32_t swP0 = swE.AddPort(gmSwLink.Get(1), gptpMc, false);
+    uint32_t swP1 = swE.AddPort(swC1Link.Get(0), gptpMc, true);
+    uint32_t swP2 = swE.AddPort(swC2Link.Get(0), gptpMc, true);
     // clients: single slave port toward sw.
-    uint32_t c1P0 = c1E.AddPort(swC1Link.Get(1), swC1Link.Get(0)->GetAddress(), false);
-    uint32_t c2P0 = c2E.AddPort(swC2Link.Get(1), swC2Link.Get(0)->GetAddress(), false);
+    uint32_t c1P0 = c1E.AddPort(swC1Link.Get(1), gptpMc, false);
+    uint32_t c2P0 = c2E.AddPort(swC2Link.Get(1), gptpMc, false);
 
     // Wire device receive callbacks to the owning entity + port index.
     gmSwLink.Get(0)->SetReceiveCallback(MakeBoundCallback(&RxTrampoline, &gmE, gmP0));
@@ -194,6 +203,19 @@ main(int argc, char* argv[])
     Simulator::Schedule(MilliSeconds(5), &syncsim::GptpEntity::StartPdelay, &c2E, pdelayInterval);
     // GM sources Sync every syncInterval starting at t = syncInterval.
     Simulator::Schedule(syncInterval, &syncsim::GptpEntity::SendSync, &gmE, syncInterval);
+    // GM also emits Announce on the same cadence (P3c, additive wire-realism).
+    // Scheduled AFTER SendSync so at each firing the Announce enqueues behind the
+    // Sync/Follow_Up burst and never delays a measured frame (numbers unchanged).
+    Simulator::Schedule(syncInterval, &syncsim::GptpEntity::SendAnnounce, &gmE, syncInterval);
+
+    // P3c: opt-in pcap on every CSMA device (gPTP path), off by default so
+    // stdout/gate numbers are byte-identical when unset. Reuses Phase 0's
+    // EnablePcapAll; captures the byte-exact 802.1AS wire format (dissectable by
+    // tshark/Wireshark, verified via ns3/scripts/check_pcap_gptp.py + tshark).
+    if (!pcapPrefix.empty())
+    {
+        csma.EnablePcapAll(pcapPrefix, false);
+    }
 
     Simulator::Stop(Seconds(simTime));
     Simulator::Run();

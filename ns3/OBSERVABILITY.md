@@ -22,9 +22,11 @@ logic in `analyze.py` are **untouched**.
   discovery fallback.
 - **`ns3/scripts/run_sweep.sh`** (new) — the ns-3 analog of
   `scripts/run_sweep.sh` + `simulations/sweep.ini`'s `${cap = 5, 20, 80}`.
-- **`--pcapPrefix` (P2c)** — a second additive, off-by-default CommandLine arg
-  enabling own-format pcap capture, with `ns3/scripts/check_pcap_gptp.py` to verify
-  it. **P3a note:** `congestion`/`feedback`'s S5 transport swap to `SimpleNetDevice`
+- **`--pcapPrefix` (P2c; P3c)** — a second additive, off-by-default CommandLine
+  arg enabling pcap capture. **Since P3c the captured format is byte-exact IEEE
+  802.1AS (EtherType 0x88F7)**, dissectable by Wireshark/tshark's own PTPv2
+  dissector; `ns3/scripts/check_pcap_gptp.py` is the dependency-free cross-check.
+  **P3a note:** `congestion`/`feedback`'s S5 transport swap to `SimpleNetDevice`
   briefly regressed this (`SimpleNetDeviceHelper` has no `EnablePcapAll`), but it's
   restored: `link()`'s `PcapCapture` hook calls ns-3's own low-level pcap primitives
   (`PcapHelper::CreateFile`/`PcapFileWrapper::Write`) by hand, once per device, from
@@ -216,9 +218,10 @@ operates on the same exported vectors (shown inline above).
 > is received by exactly one other, captured exactly once, just filed under the
 > receiver's `.pcap`); a real 14-byte Ethernet header is synthesized since
 > `SimpleNetDevice` doesn't carry one on the wire. No `gptp.{h,cc}` change was
-> needed. Verified: a fresh capture on each scenario is non-empty and
-> `check_pcap_gptp.py` PASSes with all five message types present, and the
-> unset-prefix gate path stays byte-identical.
+> needed. Verified: a fresh capture on each scenario is non-empty, tshark's PTPv2
+> dissector parses every frame (zero malformed) and `check_pcap_gptp.py` PASSes
+> with all six message types present (P3c adds Announce), and the unset-prefix
+> gate path stays byte-identical.
 
 `nominal-topology.cc` / `gptp-spike.cc` take a `--pcapPrefix=<prefix>` arg that
 enables `CsmaHelper::EnablePcapAll` (Phase 0's proven mechanism, unchanged since
@@ -229,33 +232,52 @@ described above. All four write one `<prefix>-<node>-<port>.pcap` per device. It
 are written and stdout / every gate is byte-for-byte unchanged (verified on all
 four). Same additive discipline as `--resultDir`.
 
-**Verification** — `ns3/scripts/check_pcap_gptp.py <dir-or-pcap …>` is a
-dependency-free classic-pcap parser (no scapy) that proves a capture is genuine,
-not just present: it walks each frame, and for every Ethernet frame with the gPTP
-ethertype `0x88b6` reads the first payload byte = `GptpMsgType` and tallies it,
-asserting real parseable gPTP traffic is present and — since P2b — that the 2-step
-message types (`Pdelay_Resp_Follow_Up`, `Follow_Up`) appear (a 1-step capture
-could not contain them). It mirrors `scripts/check_pcap_replay.py`'s role for the
-OMNeT++ path. **Scope:** this is round-trip-verifiable in the project's own 19-byte
-`GptpHeader` format, **not** Wireshark-dissectable 802.1AS (that needs the IEEE TLV
-wire format — Tier 3).
+**Verification (P3c — now byte-exact 802.1AS).** Since P3c the on-wire format is
+the byte-exact IEEE 802.1AS wire format on the real PTP EtherType **0x88F7** (was
+0x88b6), sent to the reserved gPTP multicast `01-80-C2-00-00-0E`. So the
+**authoritative** check is now **Wireshark/tshark's own unmodified PTPv2
+dissector**:
 
 ```
-$ python3 ns3/scripts/check_pcap_gptp.py <prefix>-1-1.pcap   # congestion bottleneck link
-  scanned 1 file(s), 1 non-empty, 12758 frames total
-  gPTP frames (ethertype 0x88b6): 118
-    type 0 PdelayReq            : 40
-    type 1 PdelayResp           : 31
-    type 2 Sync                 : 13
-    type 3 PdelayRespFollowUp   : 24     <- fewer than PdelayResp: partners dropped in the queue
-    type 4 FollowUp             : 10     <- fewer than Sync: partners dropped in the queue
+$ tshark -r <prefix>-0-0.pcap -Y ptp -T fields -e ptp.v2.messagetype | sort | uniq -c
+      7  0x00  (Sync)         20  0x02  (Pdelay_Req)     20  0x03  (Pdelay_Resp)
+      7  0x08  (Follow_Up)    20  0x0a  (…Resp_Follow_Up) 7  0x0b  (Announce)
+$ tshark -r <prefix>-0-0.pcap -Y "_ws.malformed" | wc -l
+0
+```
+
+tshark dissects every field, echoes `requestingPortIdentity`, links the chains
+(`Follow Up to Sync in Frame N`), and computes `calculatedSyncTimestamp` —
+**zero malformed across all 68 capture files** (nominal CSMA + congestion
+SimpleNetDevice). Full byte tables + transcript: **`ns3/gptp/WIRE_FORMAT.md`**.
+
+`ns3/scripts/check_pcap_gptp.py <dir-or-pcap …>` remains a dependency-free
+(no scapy / no tshark) cross-check: it walks each frame, and for every Ethernet
+frame with EtherType `0x88F7` reads `messageType = frame[14] & 0x0F` (the low
+nibble; the high nibble is transportSpecific `0x1`) and tallies it, asserting real
+parseable gPTP traffic with the 2-step types (`Follow_Up` 0x8,
+`Pdelay_Resp_Follow_Up` 0xA) present.
+
+```
+$ python3 ns3/scripts/check_pcap_gptp.py <dir>            # e.g. a nominal capture dir
+  gPTP frames (ethertype 0x88f7): 5130
+    type 0  Sync                : 510
+    type 2  PdelayReq           : 1360
+    type 3  PdelayResp          : 1360
+    type 8  FollowUp            : 510
+    type 10 PdelayRespFollowUp  : 1360
+    type 11 Announce            : 30
   PASS: genuine, parseable gPTP capture with 2-step framing
 ```
 
-The paired-frame deficit in the raw trace (31 `Pdelay_Resp` vs 24 follow-ups; 13
-`Sync` vs 10 follow-ups) is the P2b 2-step congestion finding made directly
-visible — the dropped partner frames that halve `coreClient`'s usable servo cycles
-under load (see `congestion/README.md`).
+Under congestion the raw trace still shows the P2b paired-frame deficit (fewer
+`…Follow_Up`s than their `Pdelay_Resp`/`Sync` partners) — the dropped partner
+frames that halve `coreClient`'s usable servo cycles under load (see
+`congestion/README.md`). **Honest note (P3c):** the real 802.1AS frames are larger
+than the old 19-byte header, and per S1 the measured peer delay folds in one frame
+serialization time, so displayed peer delays grow and pre-lock transient peaks
+shift ~1–7% — a pure frame-size effect (tshark's clean dissection proves the byte
+layout is correct, not a bug); all four gates still PASS. See `WIRE_FORMAT.md`.
 
 ---
 

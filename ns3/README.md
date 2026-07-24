@@ -298,4 +298,24 @@ the project's existing quality bar for OMNeT++/INET.
   cannot be verified without a Docker daemon is the literal `docker build`/
   `docker run` layer itself, which only running for real in GitHub's own runners
   can confirm.
+- **P3c (Tier 3, real 802.1AS wire format): DONE in the sandbox.** `gptp.{h,cc}`'s
+  `GptpHeader` now emits the **byte-exact IEEE 802.1AS-2011 wire format** (34-byte
+  common PTP header + per-type bodies + Follow_Up Information TLV + Announce Path
+  Trace TLV) on the real PTP EtherType **0x88F7** to the reserved gPTP multicast
+  **01-80-C2-00-00-0E**, with EUI-64 ClockIdentities from device MACs and a new
+  GM-only, additive `SendAnnounce` (static GM-quality fields, not consumed by any
+  servo). Strict-802.1AS scope (peer-delay only; no E2E/PTPv1/Signaling/Management).
+  **Authoritative check: tshark's own unmodified PTPv2 dissector parses every
+  frame of every type — zero malformed across all 68 capture files** (nominal CSMA
+  + congestion SimpleNetDevice), echoing `requestingPortIdentity` and linking the
+  Sync↔Follow_Up and Req↔Resp↔Resp-Follow-Up chains. Pure wire-**encoding** change:
+  `GptpEntity`'s algorithm is byte-for-byte unchanged; timestamps are lossless
+  (ns-3's ns resolution). One honest, disclosed consequence — the real frames are
+  larger than the old 19-byte header, so per S1 the measured peer delay grows and
+  pre-lock transient peaks shift ~1–7% (M3 congested peak `550.854→513.430 µs`,
+  isolation shape still exact; M4 non-finding preserved with all deltas `0.000`);
+  all four gates PASS deterministically. `gptp.{h,cc}` re-vendored byte-identical
+  (md5-confirmed). Full byte tables + tshark transcript in `gptp/WIRE_FORMAT.md`;
+  before/after gate table in `NS3_PARITY_PLAN.md`'s P3c section. **Not yet
+  confirmed in real CI** — same Docker-daemon caveat.
 </content>
