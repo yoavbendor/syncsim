@@ -22,7 +22,7 @@ IEEE 802.1Qbv gate-schedule or 802.1Qav credit engine.
 
 ---
 
-## Why this needs a prerequisite phase most TCAM feature requests wouldn't
+## Why packets need real IP/UDP bytes, but NOT ns-3's Internet stack
 
 Read `ns3/congestion/congestion-topology.cc`, `ns3/feedback/feedback-topology.cc`,
 and `ns3/sim/sim.cc` yourself and you'll find: **none of syncsim's ns-3 traffic
@@ -36,11 +36,41 @@ touch it.)
 
 The user's own framing — "filtering... based on source/destination IPs and
 ports," "LPM for IPv4 and IPv6 forwarding tables" — requires packets that
-*have* IPs and ports to match on. **Phase 0 below (a real IP/UDP traffic
-model for the data plane) is a genuine, sizeable prerequisite, not a
-formality.** The good news: ns-3's `internet` module is already enabled in
-this project's build (`Dockerfile`'s `--enable-modules=...,internet,...`), so
-this needs new *code*, not a new *dependency*.
+*have* IPs and ports to match on. **But real TCAM hardware doesn't
+"understand" IP semantically either.** A TCAM is pure ternary bit/byte
+matching at configured offsets in the packet; "this is a source IP address"
+is a convention the *control-plane software* applies when it programs a
+rule, not something the silicon comprehends. That means what this plan
+actually needs is packets carrying **real, byte-correct IPv4/IPv6/UDP
+header bytes** for the matcher to read — not ns-3's full Internet stack
+(`InternetStackHelper`, `Ipv4L3Protocol`, ARP, global/static routing,
+sockets) actually running.
+
+**This is a real simplification, confirmed against the pinned ns-3.45 source:**
+`Ipv4Header`, `UdpHeader`, and `Ipv6Header` (`src/internet/model/`) are
+standalone `ns3::Header` subclasses — the *exact* same pattern this
+project's own `GptpHeader` already uses (construct it, `packet->AddHeader(...)`,
+serialize/deserialize) — with **no dependency on the full stack being
+installed on a node.** `UdpHeader::InitializeChecksum(Ipv4Address,
+Ipv4Address, uint8_t)` computes a correct checksum from plain address
+values alone, no `Ipv4L3Protocol` object required.
+
+**Revised Phase 0, much smaller and lower-risk than originally scoped:**
+keep the exact traffic-generation mechanism this whole project has used
+since its own Phase 0 (`Simulator::Schedule` + direct `NetDevice::Send()` —
+proven reliable across every scenario; `OnOffApplication`+
+`PacketSocketFactory` hit a real internal ns-3.45 assertion bug back then,
+so this plan deliberately does **not** reintroduce Application/Socket-layer
+traffic generation at all). Just change what's *inside* the packet: prepend
+a real `Ipv4Header`+`UdpHeader` (or `Ipv6Header`+`UdpHeader`) with genuine,
+per-flow-distinguishable src/dst addresses and ports, sent with the real
+ethertype (`0x0800`/`0x86DD`) instead of the custom `0x88b5`. `TcamTable`/
+`LpmTable` read these fields via `packet->PeekHeader<Ipv4Header>()`/
+`PeekHeader<UdpHeader>()` — genuine, byte-correct IP/UDP data, with **no
+routing stack, no ARP, no sockets running anywhere.** The "next hop" for a
+matched LPM prefix is purely our own `LpmTable`'s answer, fed into the same
+kind of forward-out-this-port dispatch the S5 fix's `CombinedRx` already
+does — not `Ipv4StaticRouting`/`GlobalRouting`.
 
 ---
 
@@ -130,34 +160,40 @@ too.
 
 ## Phased plan
 
-### Phase 0 — Real IP/UDP traffic model *(prerequisite; genuinely sizeable, 1–2 weeks)*
+### Phase 0 — Real IP/UDP header bytes in the existing traffic path *(prerequisite; small, low-risk, 3–5 days)*
 
-- Install `InternetStackHelper` on every node (already-enabled `internet`
-  module — no new dependency). Assign IPv4 addresses per link/subnet;
-  decide addressing scheme (likely `/30` per point-to-point link, matching
-  how a real router/switch fabric is addressed, or a flatter scheme if
-  simpler serves the test scenarios equally well).
-- Convert the existing `DataSource`/burst-generator functions (currently raw
-  `NetDevice::Send()` with a custom ethertype) to real `Socket`-based UDP
-  flows (`UdpSocket`/`Ipv4RawSocket` or the `OnOffApplication`/
-  `UdpEchoClient`-style helpers, whichever proves cleanest against this
-  project's already-established "direct `NetDevice::Send()`, not
-  Application-layer" finding from Phase 0 of the original migration — **that
-  finding was specifically about a reproducible internal ns-3.45 assertion
-  bug in `OnOffApplication`+`PacketSocketFactory`; re-verify whether a real
-  `UdpSocket` (not `PacketSocketFactory`) hits the same issue before
-  assuming it does or doesn't** — carrying real, distinguishable
-  source/destination IPs and ports (varying per simulated "flow" so ACL/LPM
-  rules have real material to differentiate on, not one flat 5-tuple).
+Revised (smaller and safer than an earlier draft of this plan, which proposed
+a full `InternetStackHelper`/socket-based rewrite — see the "Why packets need
+real IP/UDP bytes, but NOT ns-3's Internet stack" section above for why that
+turned out to be unnecessary):
+
+- **No `InternetStackHelper`, no `Ipv4L3Protocol`, no ARP, no sockets.**
+  Addresses are just values we assign and stamp into packets ourselves — a
+  simple deterministic scheme (e.g. derive each node's address from its
+  existing name/index, same spirit as `MacToClockIdentity()`'s derivation in
+  the gPTP wire-format work) is enough; no address needs to be "installed"
+  anywhere for the matcher to read it back out of the packet.
+- Extend the existing `DataSource`/burst-generator functions — **still the
+  same proven `Simulator::Schedule` + direct `NetDevice::Send()` mechanism
+  this whole project has used since its own Phase 0** (no reintroduction of
+  Application/Socket-layer traffic generation, so no risk of resurfacing the
+  original `OnOffApplication`+`PacketSocketFactory` assertion bug at all) —
+  to prepend a real `Ipv4Header`+`UdpHeader` (or `Ipv6Header`+`UdpHeader`) to
+  each packet before sending, with genuine, per-simulated-flow-distinguishable
+  src/dst addresses and ports (so ACL/LPM rules have real material to
+  differentiate on, not one flat 5-tuple), sent with the real ethertype
+  (`0x0800`/`0x86DD`) instead of the custom `0x88b5`.
 - **gPTP traffic is explicitly NOT touched** — stays pure L2, no IP, exactly
   as 802.1AS specifies and as this project has always modeled it.
 - **Switches change role**: today a `switch`-role node in `ns3/sim/`'s YAML
   engine does a single hard-coded thing — forward non-gPTP frames toward one
-  fixed `sink` via a BFS-derived L2 path. Once traffic is real IP, a switch
-  needs an actual per-packet forwarding *decision* (which Phase 3's LPM table
-  provides) rather than one fixed destination. This is the real structural
-  change Phase 0 sets up for later phases — plan it with that end state in
-  mind, don't build a throwaway IP layer that Phase 3 has to rip out.
+  fixed `sink` via a BFS-derived L2 path. Once traffic carries real IP
+  headers, a switch needs an actual per-packet forwarding *decision* (which
+  Phase 3's `LpmTable` provides, feeding the same forward-out-this-port
+  dispatch `CombinedRx` already does for the S5 fix — no ns-3 routing-stack
+  object involved) rather than one fixed destination. This is the real
+  structural change Phase 0 sets up for later phases — plan it with that end
+  state in mind, don't build a throwaway IP layer Phase 3 has to rip out.
 - **Gate 0:** existing M2/M3/M4-equivalent scenarios still reproduce their
   established findings (isolation shape, coupling non-finding) with the new
   IP-based traffic model, before any ACL/LPM/QoS code is added — i.e., prove
@@ -231,7 +267,7 @@ too.
 
 | Phase | Effort | Risk | Notes |
 |---|---|---|---|
-| 0 — real IP traffic model | 1–2 wk | Medium — re-verify the `OnOffApplication` assertion-bug finding doesn't also apply to plain `UdpSocket` before assuming either way | Genuine prerequisite, not optional |
+| 0 — real IP/UDP header bytes | 3–5 days | Low — reuses the already-proven direct-`Send()` mechanism, no Application/Socket layer touched at all, no risk of the old `OnOffApplication` assertion bug | Genuine prerequisite, but small — revised down from an earlier, heavier draft (see above) |
 | 1 — `TcamTable` core | 3–5 days | Low — small, standalone, unit-testable | |
 | 2 — ACL | ~1 wk | Low–medium | |
 | 3 — LPM (IPv4) | ~1–1.5 wk | Medium — switches' forwarding role changes structurally | |
@@ -239,10 +275,8 @@ too.
 | 4 — QoS classification | ~1 wk | Low–medium — must resist scope creep into Qbv/Qav | |
 | 5 — Observability | 2–3 days | Low | |
 
-**Total, if pursued end to end: roughly 5–7 weeks.** Per this project's own
-established rhythm, each phase — arguably Phase 0 on its own, given its size
-and the structural switch-role change it sets up — should get its own
-explicit execution approval before starting, the same way every tier and
-phase in `NS3_PARITY_PLAN.md` and the original POC plan was approved
-individually. **This document is the plan only; approving it does not start
-Phase 0.**
+**Total, if pursued end to end: roughly 4–6 weeks.** Per this project's own
+established rhythm, each phase should get its own explicit execution
+approval before starting, the same way every tier and phase in
+`NS3_PARITY_PLAN.md` and the original POC plan was approved individually.
+**This document is the plan only; approving it does not start Phase 0.**
